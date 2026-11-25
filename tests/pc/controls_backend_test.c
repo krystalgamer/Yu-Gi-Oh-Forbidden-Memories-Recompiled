@@ -31,6 +31,17 @@ void ModsWindow_SetFolderPicker(int (*pick)(char *, size_t), int (*picked)(char 
     (void)pick;
     (void)picked;
 }
+/* So do the Modpack tab's file picker and the text fields' clipboard. */
+void ModsWindow_SetModpackPicker(int (*pick)(int, char *, size_t), int (*picked)(char *, size_t, char *, size_t))
+{
+    (void)pick;
+    (void)picked;
+}
+void ModsWindow_SetClipboard(int (*read)(char *, size_t), int (*write)(const char *))
+{
+    (void)read;
+    (void)write;
+}
 int ModsWindow_Tick(void) { return 0; }
 void ModsWindow_Size(int *w, int *h)
 {

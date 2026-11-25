@@ -23,6 +23,9 @@ char *Memories_WideToUtf8(const wchar_t *text);
 FILE *Memories_Fopen(const char *path, const char *mode);
 int Memories_Open(const char *path, int flags, ...);
 int Memories_Access(const char *path, int mode);
+/* 1 when `path` is a reparse point (a symbolic link, a junction...), which
+ * stat follows on Windows; 0 otherwise or when it cannot be read. */
+int Memories_IsLink(const char *path);
 int Memories_Mkdir(const char *path);
 int Memories_Rmdir(const char *path);
 int Memories_Remove(const char *path);

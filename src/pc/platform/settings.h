@@ -102,6 +102,9 @@ void Settings_Observe(void (*changed)(SettingId id, int value));
  * these have no range, so a mod validates its own values. */
 int Settings_GetNamed(const char *key, int fallback);
 void Settings_SetNamed(const char *key, int value);
+/* The key gone, as if it had never been set: Settings_GetNamed gives its
+ * fallback again, and the next save leaves it out. */
+void Settings_RemoveNamed(const char *key);
 
 void Settings_VisitNamed(void (*visit)(const char *, int, void *), void *context);
 

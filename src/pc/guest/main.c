@@ -10,6 +10,7 @@
 #include "pc/debug/crash_test.h"
 #include "pc/platform/settings.h"
 #include "pc/platform/paths.h"
+#include "pc/platform/mods_window.h"
 #include "pc/mods/mods.h"
 #include "pc/mods/exports.h"
 #include "pc/platform/game_files.h"
@@ -63,6 +64,7 @@ static void restart_environment(void)
 
 int Platform_RestartGame(void)
 {
+    ModsWindow_StopJobs(); /* TerminateProcess skips atexit: no cut-off export is left behind */
     unsetenv("MEMORIES_CONTROL"); /* no client follows a restart (MEMORIES_RESTART_ENV may name one) */
     restart_environment();
     return Win32_Restart();
@@ -90,6 +92,7 @@ int Platform_RestartGame(void)
     free(path);
     if (!executable) return -1; /* restart only a verified absolute pathname */
  #endif
+    ModsWindow_StopJobs(); /* execv skips atexit: no cut-off export is left behind */
     struct itimerval stopped = {0}, previous;
     struct sigaction ignored = {0}, old_action;
     ignored.sa_handler = SIG_IGN;

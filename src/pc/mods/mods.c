@@ -4809,6 +4809,572 @@ static void activate_once(int index, int on)
     }
 }
 
+/* SHA-256 (FIPS 180-4), for a modpack's list of files. */
+typedef struct {
+    uint32_t h[8];
+    unsigned char block[64];
+    uint64_t length;
+    size_t used;
+} Sha256;
+static const uint32_t sha_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98,
+    0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8,
+    0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819,
+    0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+    0xc67178f2};
+#define ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+static void sha_block(Sha256 *s, const unsigned char *p)
+{
+    uint32_t w[64], a, b, c, d, e, f, g, h;
+    for (int i = 0; i < 16; i++)
+        w[i] = (uint32_t)p[i * 4] << 24 | (uint32_t)p[i * 4 + 1] << 16 | (uint32_t)p[i * 4 + 2] << 8 | p[i * 4 + 3];
+    for (int i = 16; i < 64; i++)
+        w[i] = w[i - 16] + (ROR(w[i - 15], 7) ^ ROR(w[i - 15], 18) ^ (w[i - 15] >> 3)) + w[i - 7] +
+               (ROR(w[i - 2], 17) ^ ROR(w[i - 2], 19) ^ (w[i - 2] >> 10));
+    a = s->h[0], b = s->h[1], c = s->h[2], d = s->h[3], e = s->h[4], f = s->h[5], g = s->h[6], h = s->h[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = h + (ROR(e, 6) ^ ROR(e, 11) ^ ROR(e, 25)) + ((e & f) ^ (~e & g)) + sha_k[i] + w[i];
+        uint32_t t2 = (ROR(a, 2) ^ ROR(a, 13) ^ ROR(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+        h = g, g = f, f = e, e = d + t1, d = c, c = b, b = a, a = t1 + t2;
+    }
+    s->h[0] += a, s->h[1] += b, s->h[2] += c, s->h[3] += d, s->h[4] += e, s->h[5] += f, s->h[6] += g, s->h[7] += h;
+}
+/* *done grows by the bytes read (atomically, for another thread's progress
+ * bar); a nonzero *cancel stops the reading (0). Both may be NULL. */
+static int sha256_file(const char *path, char hex[65], long long *done, const int *cancel)
+{
+    static const uint32_t start[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                                      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    Sha256 s;
+    unsigned char buffer[16384];
+    size_t got;
+    FILE *file = fopen(path, "rb");
+    if (!file)
+        return 0;
+    memcpy(s.h, start, sizeof(start));
+    s.length = 0;
+    s.used = 0;
+    while ((got = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        if (cancel && __atomic_load_n(cancel, __ATOMIC_RELAXED)) { fclose(file); return 0; }
+        for (size_t i = 0; i < got; i++) {
+            s.block[s.used++] = buffer[i];
+            if (s.used == 64) { sha_block(&s, s.block); s.used = 0; }
+            s.length += 8;
+        }
+        if (done) __atomic_add_fetch(done, (long long)got, __ATOMIC_RELAXED);
+    }
+    if (ferror(file)) { fclose(file); return 0; }
+    fclose(file);
+    {
+        uint64_t bits = s.length;
+        s.block[s.used++] = 0x80;
+        if (s.used > 56) {
+            while (s.used < 64) s.block[s.used++] = 0;
+            sha_block(&s, s.block);
+            s.used = 0;
+        }
+        while (s.used < 56) s.block[s.used++] = 0;
+        for (int i = 7; i >= 0; i--) s.block[s.used++] = (unsigned char)(bits >> (i * 8));
+        sha_block(&s, s.block);
+    }
+    for (int i = 0; i < 8; i++)
+        snprintf(hex + i * 8, 9, "%08x", (unsigned)s.h[i]);
+    return 1;
+}
+int Mods_Sha256File(const char *path, char hex[65]) { return sha256_file(path, hex, NULL, NULL); }
+int Mods_Sha256FileProgress(const char *path, char hex[65], long long *done, const int *cancel)
+{
+    return sha256_file(path, hex, done, cancel);
+}
+
+/* --- Modpacks (mods.h) ----------------------------------------------- */
+static char modpack_launched[128]; /* the modpack this launch read, "" none */
+static char modpack_problem[1024];  /* why the chosen one was not read */
+static int modpack_locked;         /* its author locked its settings */
+static JsonDocument *modpack_info; /* its modpack.json, NULL without */
+int Mods_ModpackDirectory(char *out, size_t size)
+{
+    /* Not made here: a start that reads it (no pack chosen) leaves the user
+     * directory as it was; whoever writes in it makes it (Paths_MakeDirs). */
+    return Paths_User(out, size, "modpacks") ? -1 : 0;
+}
+static int modpack_file(char *out, size_t size)
+{
+    char dir[PATH_MAX_];
+    if (Mods_ModpackDirectory(dir, sizeof(dir))) return -1;
+    return (size_t)snprintf(out, size, "%s/selected.txt", dir) >= size ? -1 : 0;
+}
+int Mods_ModpackNameValid(const char *name)
+{
+    size_t n = name ? strlen(name) : 0;
+    if (!n || n >= sizeof(modpack_launched) || name[0] == '.' || name[0] == ' ' || name[n - 1] == ' ' ||
+        name[n - 1] == '.')
+        return 0;
+    for (; *name; name++)
+        if ((unsigned char)*name < 32 || strchr("/\\:*?\"<>|", *name)) return 0;
+    return 1;
+}
+int Mods_ModpackSelected(char *name, size_t size)
+{
+    char path[PATH_MAX_], line[256];
+    FILE *file;
+    size_t n;
+    if (size) name[0] = '\0';
+    if (modpack_file(path, sizeof(path)) || !(file = fopen(path, "rb"))) return 0;
+    if (!fgets(line, sizeof(line), file)) line[0] = '\0';
+    fclose(file);
+    n = strcspn(line, "\r\n");
+    line[n] = '\0';
+    if (!Mods_ModpackNameValid(line)) return 0;
+    snprintf(name, size, "%s", line);
+    return 1;
+}
+int Mods_ModpackSelect(const char *name)
+{
+    char path[PATH_MAX_], dir[PATH_MAX_];
+    FILE *file;
+    if (modpack_file(path, sizeof(path))) return -1;
+    if (!name || !*name) return remove(path) && errno != ENOENT ? -1 : 0;
+    if (!Mods_ModpackNameValid(name) || Mods_ModpackDirectory(dir, sizeof(dir)) || Paths_MakeDirs(dir) ||
+        !(file = fopen(path, "wb")))
+        return -1;
+    fprintf(file, "%s\n", name);
+    return fclose(file) ? -1 : 0;
+}
+const char *Mods_ModpackLaunched(void) { return modpack_launched; }
+const char *Mods_ModpackProblem(void) { return modpack_problem; }
+int Mods_ModpackLocked(void) { return modpack_locked; }
+/* modpacks/<name>/.verified: one line a file that passed the check, in the
+ * order of modpack.json's "files": its size, its modified time, its SHA-256
+ * and its name. A file whose size, time and listed hash are still those is
+ * not read again at the start (Activate modpack read them all once). */
+typedef struct { long long size, time; char hex[65]; char *name; } Verified;
+static Verified *verified_read(const char *folder, int *count)
+{
+    char path[PATH_MAX_], line[PATH_MAX_ + 128];
+    Verified *list = NULL;
+    int n = 0, cap = 0;
+    FILE *file;
+    *count = 0;
+    if ((size_t)snprintf(path, sizeof(path), "%s/.verified", folder) >= sizeof(path) || !(file = fopen(path, "rb")))
+        return NULL;
+    while (fgets(line, sizeof(line), file)) {
+        Verified v;
+        int at = 0;
+        line[strcspn(line, "\r\n")] = 0;
+        if (sscanf(line, "%lld %lld %64s %n", &v.size, &v.time, v.hex, &at) != 3 || !at || !line[at]) continue;
+        if (n == cap) {
+            Verified *grown = realloc(list, (size_t)(cap = cap ? cap * 2 : 256) * sizeof(*list));
+            if (!grown) break;
+            list = grown;
+        }
+        if (!(v.name = strdup(line + at))) break;
+        list[n++] = v;
+    }
+    fclose(file);
+    *count = n;
+    return list;
+}
+static void verified_free(Verified *list, int count)
+{
+    for (int i = 0; i < count; i++) free(list[i].name);
+    free(list);
+}
+/* The record of `name` (the i-th listed file): looked for at i first. */
+static const Verified *verified_find(const Verified *list, int count, int i, const char *name)
+{
+    if (i < count && !strcmp(list[i].name, name)) return &list[i];
+    for (int j = 0; j < count; j++)
+        if (!strcmp(list[j].name, name)) return &list[j];
+    return NULL;
+}
+/* Files in a pack's folder its list need not name: what the game writes there
+ * (.verified, .settings-applied) and what came beside the mods (modpack.json,
+ * poster.png), at its top only; what the system's file managers leave in any
+ * folder (desktop.ini, Thumbs.db, .DS_Store). */
+static int same_letters(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++)
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
+    return *a == *b;
+}
+static int unlisted_allowed(const char *relative, const char *name)
+{
+    if (relative == name &&
+        (!strcmp(name, "modpack.json") || !strcmp(name, "poster.png") || !strcmp(name, ".verified") ||
+         !strcmp(name, ".settings-applied")))
+        return 1;
+    return same_letters(name, "desktop.ini") || same_letters(name, "Thumbs.db") || !strcmp(name, ".DS_Store");
+}
+static int name_order(const void *a, const void *b) { return strcmp(*(const char *const *)a, *(const char *const *)b); }
+/* A symbolic link, or on Windows any reparse point (a junction too), as
+ * Mods_ImportIsLink tells them (import.c, which this file does not link). */
+static int path_is_link(const char *path)
+{
+#ifdef _WIN32
+    return Memories_IsLink(path);
+#else
+    struct stat info;
+    return !lstat(path, &info) && S_ISLNK(info.st_mode);
+#endif
+}
+/* How many files under `folder` (`relative` from the pack's top, "" there)
+ * the sorted `listed` does not name; the first in `first`. A link is never
+ * followed: an export leaves links out, so one is a file the list does not
+ * name, and entering it could walk anywhere, or loop. */
+static int unlisted_files(const char *folder, const char *relative, const char **listed, int count, char *first,
+                          size_t first_size)
+{
+    DIR *d = opendir(folder);
+    struct dirent *e;
+    int found = 0;
+    if (!d) return 0;
+    while ((e = readdir(d))) {
+        char path[PATH_MAX_], name[PATH_MAX_];
+        const char *key = name;
+        struct stat info;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if ((size_t)snprintf(path, sizeof(path), "%s/%s", folder, e->d_name) >= sizeof(path) ||
+            (size_t)snprintf(name, sizeof(name), "%s%s%s", relative, *relative ? "/" : "", e->d_name) >= sizeof(name) ||
+            stat(path, &info)) {
+            if (!found++) snprintf(first, first_size, "%s", e->d_name);
+            continue;
+        }
+        if (path_is_link(path)) {   /* counted, never entered */
+            if (!found++ && first_size) snprintf(first, first_size, "%s", name);
+            continue;
+        }
+        if (S_ISDIR(info.st_mode)) {
+            found += unlisted_files(path, name, listed, count, first, found ? 0 : first_size);
+            continue;
+        }
+        if (unlisted_allowed(name, name + strlen(name) - strlen(e->d_name)) ||
+            bsearch(&key, listed, (size_t)count, sizeof(*listed), name_order))
+            continue;
+        if (!found++ && first_size) snprintf(first, first_size, "%s", name);
+    }
+    closedir(d);
+    return found;
+}
+/* Every file the export listed must be as it was, and no other file may be
+ * there: a pack changed after it was made (a file changed, missing or
+ * added) is not read (the normal mods are). 1 when it is whole. `all` reads
+ * every file (Activate modpack), else one the record vouches for is skipped;
+ * *done, *total and *cancel as in sha256_file (may be NULL). A whole pack's
+ * record is written again when a file had to be read. */
+static int modpack_check(const char *folder, const JsonValue *files, int all, long long *done, long long *total,
+                         const int *cancel, char *why, size_t why_size)
+{
+    char path[PATH_MAX_], hex[65];
+    int bad = 0, n = 0, read = 0, known = 0;
+    const char *first = NULL;
+    Verified *record;
+    FILE *out = NULL;
+    struct stat info;
+    if (Json_TypeOf(files) != JSON_OBJECT) {
+        snprintf(why, why_size, "Its modpack.json has no list of files, so it was not loaded.");
+        return 0;
+    }
+    {   /* a file the list does not name: refused before any is read */
+        int count = Json_Count(files), extra;
+        const char **listed = calloc((size_t)count + 1, sizeof(*listed));
+        char name[PATH_MAX_] = "";
+        if (!listed) {
+            snprintf(why, why_size, "Out of memory.");
+            return 0;
+        }
+        count = 0;
+        for (const JsonValue *f = Json_At(files, 0); f; f = Json_Next(f))
+            if (Json_Name(f)) listed[count++] = Json_Name(f);
+        qsort(listed, (size_t)count, sizeof(*listed), name_order);
+        extra = unlisted_files(folder, "", listed, count, name, sizeof(name));
+        free(listed);
+        if (extra) {
+            snprintf(why, why_size, "%d file(s) in it are not in its list (%s), so it was not loaded.", extra, name);
+            return 0;
+        }
+    }
+    record = verified_read(folder, &known);
+    if (total) {
+        long long sum = 0;
+        for (const JsonValue *f = Json_At(files, 0); f; f = Json_Next(f)) {
+            const char *name = Json_Name(f);
+            if (name && Paths_Contained(name) && (size_t)snprintf(path, sizeof(path), "%s/%s", folder, name) < sizeof(path) &&
+                !stat(path, &info))
+                sum += (long long)info.st_size;
+        }
+        __atomic_store_n(total, sum, __ATOMIC_RELAXED);
+    }
+    for (const JsonValue *f = Json_At(files, 0); f; f = Json_Next(f), n++) {
+        const char *name = Json_Name(f), *want = Json_String(f, "");
+        const Verified *v;
+        int ok = name && Paths_Contained(name) && (size_t)snprintf(path, sizeof(path), "%s/%s", folder, name) < sizeof(path) &&
+                 !stat(path, &info);
+        if (ok && !all && (v = verified_find(record, known, n, name)) && v->size == (long long)info.st_size &&
+            v->time == (long long)info.st_mtime && !strcmp(v->hex, want)) {
+            if (done) __atomic_add_fetch(done, (long long)info.st_size, __ATOMIC_RELAXED);
+            continue;
+        }
+        read++;
+        if (ok && !sha256_file(path, hex, done, cancel)) {
+            if (cancel && __atomic_load_n(cancel, __ATOMIC_RELAXED)) {
+                snprintf(why, why_size, "Cancelled.");
+                verified_free(record, known);
+                return 0;
+            }
+            ok = 0;
+        }
+        if (!ok || strcmp(hex, want))
+            if (!bad++) first = name;
+    }
+    verified_free(record, known);
+    if (bad) {
+        snprintf(why, why_size, "%d of its %d files were changed or are missing (%s), so it was not loaded.", bad, n,
+                 first ? first : "?");
+        snprintf(path, sizeof(path), "%s/.verified", folder);
+        remove(path);
+        return 0;
+    }
+    if (read && (size_t)snprintf(path, sizeof(path), "%s/.verified", folder) < sizeof(path) && (out = fopen(path, "wb"))) {
+        n = 0;
+        for (const JsonValue *f = Json_At(files, 0); f; f = Json_Next(f), n++) {
+            char file[PATH_MAX_];
+            if ((size_t)snprintf(file, sizeof(file), "%s/%s", folder, Json_Name(f)) < sizeof(file) && !stat(file, &info))
+                fprintf(out, "%lld %lld %s %s\n", (long long)info.st_size, (long long)info.st_mtime, Json_String(f, ""),
+                        Json_Name(f));
+        }
+        if (fclose(out)) remove(path);
+    }
+    return 1;
+}
+int Mods_ModpackPrepare(const char *name, long long *done, long long *total, const int *cancel, char *why,
+                        size_t why_size)
+{
+    char dir[PATH_MAX_], folder[PATH_MAX_], path[PATH_MAX_], error[200];
+    JsonDocument *info;
+    struct stat st;
+    int ok;
+    if (!Mods_ModpackNameValid(name) || Mods_ModpackDirectory(dir, sizeof(dir)) ||
+        (size_t)snprintf(folder, sizeof(folder), "%s/%s", dir, name) >= sizeof(folder) || stat(folder, &st) ||
+        !S_ISDIR(st.st_mode)) {
+        snprintf(why, why_size, "The modpack %s is gone.", name ? name : "?");
+        return 0;
+    }
+    if ((size_t)snprintf(path, sizeof(path), "%s/modpack.json", folder) >= sizeof(path)) {
+        snprintf(why, why_size, "Its folder's path is too long.");
+        return 0;
+    }
+    if (access(path, 0)) return 1; /* a folder made by hand: nothing listed to check */
+    if (!(info = Json_ParseFile(path, error, sizeof(error)))) {
+        snprintf(why, why_size, "Its modpack.json is damaged (%s).", error);
+        return 0;
+    }
+    ok = modpack_check(folder, Json_Member(Json_Root(info), "files"), 1, done, total, cancel, why, why_size);
+    Json_Free(info);
+    return ok;
+}
+/* --- A modpack's settings, apart from the player's own ----------------- *
+ * A pack's mods read and write the same `mod.<id>` and `mod.<id>.<key>`
+ * settings as the normal mods. So before a pack's launch writes any, every
+ * `mod.` setting is saved in modpacks/.normal-settings (first line
+ * "modpack=<name>", then key=value lines), unless that pack's session already
+ * saved them. A launch without that pack (no modpack, or another) puts them
+ * back: each saved value again, every `mod.` key the file lacks gone (its
+ * default again) but for a `mod.<id>=0` (key_collect), saved; then the
+ * packs' .settings-applied markers go, so
+ * the next launch of a pack is its first again, and the file goes. */
+#define NORMAL_SETTINGS ".normal-settings"
+static int normal_settings_path(char *out, size_t size)
+{
+    char dir[PATH_MAX_];
+    if (Mods_ModpackDirectory(dir, sizeof(dir))) return -1;
+    return (size_t)snprintf(out, size, "%s/" NORMAL_SETTINGS, dir) >= size ? -1 : 0;
+}
+static void normal_settings_line(const char *key, int value, void *file)
+{
+    if (!strncmp(key, "mod.", 4)) fprintf(file, "%s=%d\n", key, value);
+}
+/* Saves the player's own `mod.` settings before the pack `pack` writes its
+ * own: 0, or -1 when they could not be (the pack is then not read). A saved
+ * file already there is kept, never replaced: it is there only when putting
+ * it back failed (normal_settings_restore), so the settings now are another
+ * pack's, and the file is still the one place the player's own are. */
+static int normal_settings_save(const char *pack)
+{
+    char dir[PATH_MAX_], path[PATH_MAX_], temporary[PATH_MAX_ + 8];
+    FILE *file;
+    int failed;
+    if (Mods_ModpackDirectory(dir, sizeof(dir)) || Paths_MakeDirs(dir) ||
+        normal_settings_path(path, sizeof(path)))
+        return -1;
+    if (!access(path, 0)) return 0;
+    if ((size_t)snprintf(temporary, sizeof(temporary), "%s.tmp", path) >= sizeof(temporary) ||
+        !(file = fopen(temporary, "wb")))
+        return -1;
+    fprintf(file, "modpack=%s\n", pack);
+    Settings_VisitNamed(normal_settings_line, file);
+    failed = ferror(file);
+    if (fclose(file)) failed = 1;
+    if (failed || rename(temporary, path)) {
+        remove(temporary);
+        return -1;
+    }
+    return 0;
+}
+typedef struct { char **keys; int count, room, failed; } KeyList;
+/* The `mod.` keys the restore removes before it puts the saved ones back. An
+ * enable flag `mod.<id>` that is 0 stays: off is the safe choice, and it is
+ * how a mod imported during the pack's session (Mods_Discover) stays off
+ * until the player turns it on, instead of following its manifest. */
+static void key_collect(const char *key, int value, void *context)
+{
+    KeyList *list = context;
+    if (strncmp(key, "mod.", 4) || list->failed) return;
+    if (!value && !strchr(key + 4, '.')) return;
+    if (list->count == list->room) {
+        int room = list->room ? list->room * 2 : 256;
+        char **grown = realloc(list->keys, (size_t)room * sizeof(*grown));
+        if (!grown) { list->failed = 1; return; }
+        list->keys = grown;
+        list->room = room;
+    }
+    if (!(list->keys[list->count] = strdup(key))) list->failed = 1;
+    else list->count++;
+}
+/* The packs' .settings-applied markers removed: each one's next launch is its first. */
+static void modpack_markers_remove(void)
+{
+    char dir[PATH_MAX_], path[PATH_MAX_];
+    DIR *d;
+    struct dirent *e;
+    if (Mods_ModpackDirectory(dir, sizeof(dir)) || !(d = opendir(dir))) return;
+    while ((e = readdir(d)))
+        if (Mods_ModpackNameValid(e->d_name) &&
+            (size_t)snprintf(path, sizeof(path), "%s/%s/.settings-applied", dir, e->d_name) < sizeof(path))
+            remove(path);
+    closedir(d);
+}
+/* At the start, before the mods' settings are read: when a pack's session
+ * saved the player's own settings and this launch does not read that pack
+ * (`pack`, NULL for none), they are put back. 1 when the session of `pack`
+ * goes on (its saved settings stay saved), else 0. */
+static int normal_settings_restore(const char *pack)
+{
+    char path[PATH_MAX_], line[512], *equals;
+    KeyList current = {0};
+    FILE *file;
+    int value;
+    if (normal_settings_path(path, sizeof(path)) || !(file = fopen(path, "rb"))) return 0;
+    if (!fgets(line, sizeof(line), file) || strncmp(line, "modpack=", 8)) line[0] = '\0';
+    line[strcspn(line, "\r\n")] = '\0';
+    if (pack && line[0] && !strcmp(line + 8, pack)) {
+        fclose(file);
+        return 1;
+    }
+    Settings_VisitNamed(key_collect, &current);
+    if (current.failed) {   /* out of memory: try again at the next launch */
+        fclose(file);
+        for (int i = 0; i < current.count; i++) free(current.keys[i]);
+        free(current.keys);
+        return 0;
+    }
+    for (int i = 0; i < current.count; i++) {
+        Settings_RemoveNamed(current.keys[i]);
+        free(current.keys[i]);
+    }
+    free(current.keys);
+    while (fgets(line, sizeof(line), file)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!strncmp(line, "mod.", 4) && (equals = strchr(line, '=')) && sscanf(equals + 1, "%d", &value) == 1) {
+            *equals = '\0';
+            Settings_SetNamed(line, value);
+        }
+    }
+    fclose(file);
+    if (!Settings_Save()) {
+        fprintf(stderr, "memories-pc: %s\n", Settings_LastError());
+        return 0;   /* the file stays: the next launch puts them back again */
+    }
+    modpack_markers_remove();
+    remove(path);
+    say("the mod settings a modpack's launch had saved aside are back");
+    return 0;
+}
+/* Its mods' settings and load order, as exported: at every launch when it
+ * is locked, else at its first (no .settings-applied yet: Mods_Load turns
+ * all its mods on then, saves, and writes the marker). */
+static int modpack_first;            /* this launch is the unlocked pack's first */
+static char modpack_marker[PATH_MAX_];
+static void modpack_settings(const char *folder)
+{
+    char key[256];
+    const JsonValue *list = Json_Member(Json_Root(modpack_info), "mods");
+    snprintf(modpack_marker, sizeof(modpack_marker), "%s/.settings-applied", folder);
+    modpack_first = !modpack_locked && access(modpack_marker, 0) != 0;
+    if (!modpack_locked && !modpack_first) return;
+    for (int i = 0; i < Json_Count(list); i++) {
+        const JsonValue *mod = Json_At(list, i), *settings = Json_Member(mod, "settings");
+        const char *id = Json_String(Json_Member(mod, "id"), "");
+        if (!*id) continue;
+        if (Json_TypeOf(Json_Member(mod, "order")) == JSON_NUMBER && setting_key(key, sizeof(key), id, "order"))
+            Settings_SetNamed(key, (int)Json_Number(Json_Member(mod, "order"), 0));
+        for (const JsonValue *v = Json_At(settings, 0); v; v = Json_Next(v))
+            if (Json_Name(v) && setting_key(key, sizeof(key), id, Json_Name(v)))
+                Settings_SetNamed(key, (int)Json_Number(v, 0));
+    }
+}
+/* The selected modpack's folder, when there is one that exists: the scan
+ * then reads it alone (the normal mods folders wait for a launch without). */
+static int modpack_folder(char *out, size_t size)
+{
+    char name[128], dir[PATH_MAX_];
+    struct stat info;
+    if (!Mods_ModpackSelected(name, sizeof(name)) || Mods_ModpackDirectory(dir, sizeof(dir))) return 0;
+    if ((size_t)snprintf(out, size, "%s/%s", dir, name) >= size) return 0;
+    if (stat(out, &info) || !S_ISDIR(info.st_mode)) {
+        snprintf(modpack_problem, sizeof(modpack_problem), "The modpack %s is gone, so the normal mods were loaded.",
+                 name);
+        fprintf(stderr, "memories-pc: %s\n", modpack_problem);
+        return 0;
+    }
+    {
+        char path[PATH_MAX_], error[200], why[300];
+        snprintf(path, sizeof(path), "%s/modpack.json", out);
+        if (!access(path, 0)) {
+            if (!(modpack_info = Json_ParseFile(path, error, sizeof(error)))) {
+                snprintf(modpack_problem, sizeof(modpack_problem), "The modpack %s: modpack.json is damaged (%s), so the normal mods were loaded.", name, error);
+                fprintf(stderr, "memories-pc: %s\n", modpack_problem);
+                return 0;
+            }
+            if (!modpack_check(out, Json_Member(Json_Root(modpack_info), "files"), 0, NULL, NULL, NULL, why, sizeof(why))) {
+                snprintf(modpack_problem, sizeof(modpack_problem), "The modpack %s was modified: %s The normal mods were loaded.", name, why);
+                fprintf(stderr, "memories-pc: %s\n", modpack_problem);
+                Json_Free(modpack_info);
+                modpack_info = NULL;
+                return 0;
+            }
+            modpack_locked = Json_Bool(Json_Member(Json_Root(modpack_info), "locked"), 0);
+        }
+    }
+    /* The player's own mod settings aside before the pack writes any. */
+    if (!normal_settings_restore(name) && normal_settings_save(name)) {
+        snprintf(modpack_problem, sizeof(modpack_problem),
+                 "The modpack %s: your own mod settings could not be saved aside, so the normal mods were loaded.",
+                 name);
+        fprintf(stderr, "memories-pc: %s\n", modpack_problem);
+        Json_Free(modpack_info);
+        modpack_info = NULL;
+        modpack_locked = 0;
+        return 0;
+    }
+    modpack_settings(out);
+    snprintf(modpack_launched, sizeof(modpack_launched), "%s", name);
+    return 1;
+}
+
 int Mods_InstallDirectory(char *out, size_t size)
 {
     const char *named = getenv("MEMORIES_MODS_DIR");
@@ -4901,9 +5467,15 @@ void Mods_Load(void)
         const char *named = getenv("MEMORIES_MODS_DIR");
         scanned = 1;
         if (named && *named) {
+            normal_settings_restore(NULL);
             scan(named, "installed");
             scan_folder(1);
+        } else if (modpack_folder(path, sizeof(path))) {
+            /* A modpack: its mods alone (the Modpack tab; which are on: below). */
+            scan(path, "installed");
+            say("modpack %s: %s", modpack_launched, path);
         } else {
+            normal_settings_restore(NULL);   /* before a mod's setting is read */
             if (!Paths_Program(path, sizeof(path), "mods")) scan(path, "shipped");
             scan_folder(0);
             if (!Paths_User(path, sizeof(path), "mods")) scan(path, "installed");
@@ -4921,11 +5493,27 @@ void Mods_Load(void)
         char key[256];
         int want;
         want = mods[i].enabled;
-        if (setting_key(key, sizeof(key), mods[i].id, NULL)) want = Settings_GetNamed(key, want);
+        if (modpack_launched[0]) {
+            /* A locked pack's mods are all on, at every launch; an unlocked
+             * one's at its first launch, written down (a mod.<id> 0 from the
+             * normal settings would else turn it off at the second), and
+             * after that as the player left them, on by default. */
+            if (modpack_locked || (first && modpack_first)) {
+                want = 1;
+                if (setting_key(key, sizeof(key), mods[i].id, NULL)) Settings_SetNamed(key, 1);
+            } else if (setting_key(key, sizeof(key), mods[i].id, NULL))
+                want = Settings_GetNamed(key, 1);
+        } else if (setting_key(key, sizeof(key), mods[i].id, NULL)) want = Settings_GetNamed(key, want);
         want = environment_choice(mods[i].id, want) != 0;
         if (all && (!strcmp(all, "0") || !strcmp(all, "off"))) want = 0;
         mods[i].enabled = want;
         enabled[i] = want;
+    }
+    if (first && modpack_first) {
+        /* What the pack's first launch wrote is kept before the marker says
+         * it was: a launch that never saves would else lose it. */
+        FILE *marker;
+        if (Settings_Save() && (marker = fopen(modpack_marker, "wb"))) fclose(marker);
     }
     for (i = 0; i < mod_count; i++) if (enabled[i] && !Mods_Compatible(i, enabled, error, sizeof(error))) {
         note(&mods[i], "%s", error); enabled[i] = 0;

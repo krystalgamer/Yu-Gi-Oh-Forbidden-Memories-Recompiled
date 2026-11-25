@@ -47,6 +47,7 @@
 #include "platform.h"
 #include "paths.h"
 #include "game_files.h"
+#include "mods_window.h"
 #include "pc/guest/image.h"
 #include <SDL3/SDL.h>
 #include <android/log.h>
@@ -1348,6 +1349,7 @@ static void restart_on_host(void *result)
 int Platform_RestartGame(void)
 {
     int result = 0;
+    ModsWindow_StopJobs(); /* the activity ends this process: atexit never runs */
     Memories_OnHostStack(restart_on_host, &result); /* JNI: never from the game stack */
     return result;
 }

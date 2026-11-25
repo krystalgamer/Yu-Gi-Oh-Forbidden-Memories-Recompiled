@@ -390,6 +390,14 @@ void Settings_SetNamed(const char *key, int value)
     if (key && *key) set_named(key, value);
 }
 
+void Settings_RemoveNamed(const char *key)
+{
+    Named *entry = key ? find_named(key, 0) : NULL;
+    if (!entry) return;
+    memmove(entry, entry + 1, (size_t)(named + named_count - (entry + 1)) * sizeof(*entry));
+    named_count--;
+}
+
 void Settings_Observe(void (*changed)(SettingId id, int value))
 {
     int i;

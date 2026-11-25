@@ -492,6 +492,98 @@ installs a `.zip`. Nothing is contacted until it is tapped.
   Update, in use, the clean-up at panel open); `pc_mod_import` checks the
   importer's progress and cancel (`Mods_ImportWatch`).
 
+**Modpack** (the tab beside the mods list; `Mods_Modpack*` in
+`src/pc/mods/mods.h`): a modpack is a folder of mods in the user directory's
+`modpacks/`, made from a `.zip` by Import... (its `modpack.json` names it,
+lists its mods with their load order and option values, says whether it is
+`"locked"`, and gives every file's SHA-256 under `"files"`; Export... writes
+such a `.zip` from mods of the normal folders). Activate modpack chooses one
+(`modpacks/selected.txt`) for the next launch, which reads only that folder,
+instead of every other mods folder; "No modpack" goes back to the normal mods.
+A folder put in `modpacks/` by hand, without a `modpack.json`, is a modpack
+too. `modpacks/` is made only when something is written in it (an import,
+an export's suggested place, Open folder, a choice of pack, the player's
+settings saved aside): a start without a pack leaves the user directory as
+it was.
+
+- **Code mods** in a pack are marked in its detail before Activate: a "Code
+  mod" tag on its card and a line naming them, read from the pack's mod
+  folders as the scan will load them (`Mods_ImportFolderCode`, the same
+  "library"/"libraries" test as the loader and Import mod...); the Export
+  form's preview marks them too. Information only: no question is asked.
+- **The check.** A pack with a `modpack.json` is read only when it is as it
+  was made: every file its `"files"` list names is there with that SHA-256,
+  and no other file is in its folder, except `modpack.json` and `poster.png`
+  at its top, what the game writes there (`.verified`, `.settings-applied`)
+  and what file managers leave in any folder (`desktop.ini`, `Thumbs.db`,
+  `.DS_Store`). A `modpack.json` without a `"files"` list is refused. A
+  changed, missing or added file, from an edit or damage after it was made,
+  keeps the pack out at the start (the normal mods are read, and the window
+  says why) and fails Activate modpack, which reads every file once
+  (`Mods_ModpackPrepare`); the start reads only the files whose size and
+  time changed since (`.verified`), but looks for added files every time.
+  A link in it (a symbolic link, or on Windows a junction) counts as such a
+  file and is never entered: export leaves links out, so the list never
+  names one.
+  It is not a signature: the list travels in the same `.zip` as the files,
+  so it says nothing about who made the pack. A folder without
+  `modpack.json` (made by hand) is read unchecked.
+- **Export** packs each ticked mod's folder as it is on disk, but leaves out
+  symbolic links and (Windows) junctions or any other reparse point
+  (`Mods_ImportIsLink`): followed, one could loop or pack files from
+  outside the mod's folder.
+- **Import** unpacks into a hidden `modpacks/.importing-*` folder, which
+  takes the pack's name only once everything, `modpack.json` included, is
+  in it; a failed or stopped import removes it, and the next import sweeps
+  any that a killed process left. So a cut-off import never looks like a
+  folder made by hand.
+- **Its jobs** (Import..., Export..., Activate modpack's reading) run on
+  threads of their own with a bar and Stop. Restart, and an Apply on the
+  Mods tab that restarts, are refused while one runs (the status line says
+  to wait or stop it). Closing the window, the game quitting (`exit`,
+  through `atexit`), or any restart (`Platform_RestartGame` calls
+  `ModsWindow_StopJobs` first, since the restart replaces the process
+  without `atexit`: Language and every other caller) stops a running
+  one and joins its thread, which removes what it had made (the import's
+  hidden folder, the export's `.zip`). A killed process leaves an import's
+  hidden folder, which the next import sweeps.
+- **Its settings are its own.** A pack's mods use the same `mod.<id>` and
+  `mod.<id>.<key>` settings as the normal mods, so before a pack's launch
+  writes any, every `mod.` setting the player has is saved in
+  `modpacks/.normal-settings` (written whole or not at all; first line
+  `modpack=<name>`). A launch without that pack (no modpack, another one, or
+  `MEMORIES_MODS_DIR`) puts them back before any mod's setting is read: each
+  saved value again, every `mod.` key the file lacks gone (its default
+  again), saved, and the file removed. One kind stays: a mod's on/off
+  `mod.<id>` that is 0, since off is the safe choice; a mod imported during
+  the pack's session (written off by the import) so stays off until the
+  player turns it on, instead of following its manifest's `"enabled"`.
+  The saved file is never replaced: one already there when a pack's launch
+  would save means putting it back failed (out of memory, or the settings
+  could not be saved), so it is kept, still the player's own, and the next
+  launch tries again. So what a pack wrote, and what the
+  player changed while it ran, never reaches the normal mods. When the
+  settings cannot be saved aside, the pack is not read (the normal mods are,
+  and the window says why).
+- **When its values are applied:** a locked pack's at every launch; an
+  unlocked pack's at its first launch, which saves them and then writes
+  `.settings-applied` in its folder. Putting the player's own settings back
+  also removes the packs' `.settings-applied`, so the next launch of a pack
+  is its first again: a pack's session is kept while it is the one chosen,
+  not after the normal mods ran.
+- **Which of its mods are on:** a locked pack's all, at every launch. An
+  unlocked pack's all at its first launch (written as `mod.<id>` 1, so an
+  old 0 of the player's does not turn one off later), then as the player
+  left them in the Mods window (`mod.<id>`, on when there is none): a mod
+  turned off stays off.
+- `pc_modpack` runs a pack's launches one process each (as `Mods_Load` scans
+  once): first, again, normal, the pack again.
+- `pc_mods_window`'s round trip exports two mods (a data mod, a code mod
+  with a binary object) with the tab's own Export job, imports the .zip
+  with its Import job, and checks the result: Activate's check passes, and
+  two start-ups of the pack (a process each) read it with no problem. The
+  export's "files" list and the import's files must be the same names.
+
 Implementation: `src/pc/platform/mods_window.c`, `src/pc/mods/manager.c`
 (`src/pc/mods/overlap.c` for the overlaps, `src/pc/mods/import.c` for Import
 mod..., `src/pc/mods/hd_pack.c` for HD pack...), and

@@ -197,3 +197,11 @@ accept v0.3.0 function Model_GetViewMetricsBuffer returns ModelViewMetrics * (th
 # as before; the deferred raster just holds nothing while it is set.
 accept v0.2.0 record SoftGpuRecorder grew by the patch callback at its end
 accept v0.3.0 record SoftGpuRecorder grew by the patch callback at its end
+# The Mods window's Modpack tab (PR #488): every MenuEvent gained `modifiers`
+# (Shift, Ctrl, Alt held) at its end. The port fills MenuEvents itself
+# (sdl.c, from SDL's events) and only its own windows read them
+# (mods_window.c's text fields); no released mod includes menu.h or makes a
+# MenuEvent, and none calls Menu_Event or a window's *_Event with one.
+accept v0.1.2 record MenuEvent grew by modifiers at its end
+accept v0.2.0 record MenuEvent grew by modifiers at its end
+accept v0.3.0 record MenuEvent grew by modifiers at its end

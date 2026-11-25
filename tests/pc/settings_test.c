@@ -71,6 +71,16 @@ int main(void)
     Settings_Set(SET_HD_HUD, 1);
     assert(Settings_Get(SET_HD_HUD) == 0 && Settings_GetNamed("hd_hud", -1) == 1);
     assert(contains(path, "hd_hud=1\n"));
+    /* A removed key reads as never set, and the save leaves it out; the
+     * others keep their values. */
+    Settings_SetNamed("mod.gone", 5);
+    Settings_SetNamed("mod.kept", 6);
+    Settings_RemoveNamed("mod.gone");
+    Settings_RemoveNamed("mod.never-there");
+    assert(Settings_GetNamed("mod.gone", -1) == -1 && Settings_GetNamed("mod.kept", -1) == 6);
+    assert(Settings_GetNamed("hd_hud", -1) == 1);
+    assert(Settings_Save()); Settings_Load();
+    assert(!contains(path, "mod.gone=") && contains(path, "mod.kept=6\n") && Settings_GetNamed("mod.gone", -1) == -1);
     for (int i = 0; i < 1024; i++) {
         char key[200]; snprintf(key, sizeof(key), "mod.a_very_long_mod_id_that_used_to_exceed_the_old_key_limit.option_%d", i);
         Settings_SetNamed(key, i);
