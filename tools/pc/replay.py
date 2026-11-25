@@ -68,14 +68,6 @@ ROOT = Path(__file__).resolve().parents[2]
 REPLAYS = ROOT / "tests/pc/replays"
 OUTPUT = ROOT / "tmp/pc/replays"
 GUEST_RAM, RAM_SIZE, SCRATCHPAD = 0x80000000, 0x200000, 0x1F800000
-# RAM a deterministic run did not hold the same from run to run: the sound
-# driver's work area (g_SDValue). It reads the voices' levels, which a mixer
-# thread paced by the host's clock had moved a different amount at the same
-# game instant in each run. Under MEMORIES_DETERMINISTIC with no audio device,
-# what a replay runs, the mixer is now stepped by virtual time on the game
-# thread and the area is the same; the mask stays until the dead game stack's
-# residue, which still reaches a few bytes of RAM elsewhere, is cleared too.
-MASKS = [(0x801E0384, 0x801E1B44)]
 
 
 # The container: a folder or a zip of the same files.
@@ -303,11 +295,9 @@ def memory(path: Path) -> bytes:
 
 
 def first_ram_difference(expected: Path, actual: Path) -> str | None:
-    """The first differing range of guest RAM and the scratchpad, with the
-    masks applied; None when they agree."""
-    a, b = bytearray(memory(expected)), bytearray(memory(actual))
-    for low, high in MASKS:
-        a[low - GUEST_RAM:high - GUEST_RAM] = b[low - GUEST_RAM:high - GUEST_RAM] = bytes(high - low)
+    """The first differing range of guest RAM and the scratchpad, none of it
+    masked; None when they agree."""
+    a, b = memory(expected), memory(actual)
     for at in range(0, min(len(a), len(b)), 4096):
         if a[at:at + 4096] != b[at:at + 4096]:
             start = next(i for i in range(at, at + 4096) if a[i] != b[i])
@@ -363,7 +353,7 @@ def check(replay: Replay, actual_path: Path) -> bool:
         difference = first_ram_difference(replay.file(Path(name).name), Path(mine[1]))
         if difference:
             report(f"replay: {replay.name}: RAM at the state checkpoint of VBlank {index} differs first at "
-                  f"{difference} (g_SDValue masked)")
+                  f"{difference}")
             ok = False
             break
     return ok

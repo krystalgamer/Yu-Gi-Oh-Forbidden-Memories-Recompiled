@@ -71,10 +71,10 @@ paced by the host's clock, so the sound driver's memory (`g_SDValue` and
 its secondary state, 0x801E0000 to about 0x801E1B50) is the same in two
 lockstep runs too, as are the spu and libspu chunks of a state saved at the
 same VBlank. Before, that driver memory differed in every run, which is why
-RAM comparisons (replay.py's `MASKS`) mask it; the mask can go once the
-dead game stack's residue, which still reaches a few bytes elsewhere, is
-cleared as well. Headless or `MEMORIES_NO_AUDIO=1` is the deterministic
-path: a run with a device keeps the device-paced mixer, and so does a
+replay.py's RAM comparisons once masked it; with the dead game stack
+scrubbed as well, they mask nothing: every byte of RAM and scratchpad is
+compared. Headless or `MEMORIES_NO_AUDIO=1` is the deterministic path: a
+run with a device keeps the device-paced mixer, and so does a
 windowed run with `SDL_AUDIODRIVER=dummy` (SDL's dummy device opens) or a
 windowed `yfm_control.py` game, which sets `MEMORIES_DETERMINISTIC` but
 not `MEMORIES_NO_AUDIO`: their driver memory still differs from run to
@@ -327,10 +327,9 @@ replay can begin at a state.
      it changes: a host too slow for a frame slows the game instead of
      letting VBlanks pass (the console's way, and the real-time clock's, is
      a frame that counts two VBlanks), and the music's sequencer follows
-     game time, not the wall clock. The audio mixer stays on real time
-     (RAM comparisons mask `g_SDValue`). This needs a pacer that lets a
-     slow frame cost VBlanks the way real time does, decided only from
-     virtual time (for one, a frame that overruns its VBlank budget, as
+     game time, not the wall clock. The audio mixer stays on real time.
+     This needs a pacer that lets a slow frame cost VBlanks the way real
+     time does, decided only from virtual time (for one, a frame that overruns its VBlank budget, as
      measured in virtual time by the work done, gets its second VBlank),
      and a check that a played session looks and sounds the same.
   2. Record the real-time clock instead: at every `advance()` the elapsed
@@ -363,7 +362,7 @@ not decide the shape of the second.
 
 `tools/pc/replay.py play FILE --check` runs a replay and reports the first
 VBlank whose frame differs. When a state checkpoint exists, it also reports
-the first RAM range that differs, with the noisy ranges above masked.
+the first RAM range that differs, none of it masked.
 
 Replays live in `tests/pc/replays/`. They need the disc, which the port's CI
 does not have (only the matching build gets the retail executable, through a
@@ -397,7 +396,7 @@ CI can hold retail inputs.
   `MEMORIES_PLAY`, records the play, and names the first frame hash that
   differs (its VBlank and the frame it was; one the play does not reach,
   the run having ended or taken another path) and, at the first state
-  checkpoint whose RAM differs (the `memory` chunk; `g_SDValue` masked, the
+  checkpoint whose RAM differs (the `memory` chunk, all of it; the
   other chunks not compared), the first differing range. `--update` takes
   this build's hashes as the expected ones. A nonzero game exit, timeout,
   missing recording/end marker, or premature end fails playback, including
