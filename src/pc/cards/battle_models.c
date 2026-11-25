@@ -159,7 +159,14 @@ static void stamp(s32 from_address, s32 to_address, int bank)
             u32 command = from[at];
             unsigned op = command >> 24, length = (unsigned)Memories_GpuCommandWords(command);
             if (!length || at + length > words + 1) break;
-            if (op >= 0x24 && op <= 0x3f && (op & 4)) from[at + 4 + ((op & 0x10) ? 1 : 0)] |= bits;
+            if (op >= 0x24 && op <= 0x3f && (op & 4)) {
+                unsigned gouraud = (op & 0x10) ? 1 : 0;
+                from[at + 4 + gouraud] |= bits;
+                /* The third corner's spare half is a banked polygon's fade
+                 * (soft_gpu.h): the record's pad, or a Gouraud quad's first
+                 * normal, must not fade it. */
+                from[at + 6 + 2 * gouraud] &= 0xffffu;
+            }
             at += length;
         }
         from += words + 1;
