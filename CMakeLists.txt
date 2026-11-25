@@ -197,6 +197,20 @@ if(BUILD_TESTING)
         target_compile_options(memories_model_claim_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME pc_model_claim COMMAND memories_model_claim_test)
+    # What a bigger mod model's banked polygons carry (src/pc/cards/battle_models.c,
+    # stamp). It takes the game's headers, whose layout checks and the packets'
+    # 32-bit guest addresses are 32-bit ones, so it is a 32-bit target only.
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+        add_executable(memories_battle_models_stamp_test tests/pc/battle_models_stamp_test.c src/pc/render/packets.c)
+        target_include_directories(memories_battle_models_stamp_test PRIVATE src)
+        target_compile_definitions(memories_battle_models_stamp_test PRIVATE MEMORIES_PC _LANGUAGE_C LANGUAGE_C)
+        if(NOT MSVC)
+            # The game headers it takes in (psyq, game/model.h) are not warning-clean.
+            target_compile_options(memories_battle_models_stamp_test PRIVATE -Wall -Wextra -Werror
+                -Wno-incompatible-library-redeclaration -Wno-gnu-folding-constant -Wno-strict-prototypes)
+        endif()
+        add_test(NAME pc_battle_models_stamp COMMAND memories_battle_models_stamp_test)
+    endif()
     add_executable(memories_deck_shop_test tests/pc/deck_shop_test.c src/pc/saves/deck_shop.c)
     add_executable(memories_entry_layout_test tests/pc/entry_layout_test.c src/pc/text/entry_layout.c)
     add_executable(memories_state_remap_test tests/pc/state_remap_test.c src/pc/guest/state_remap.c)
