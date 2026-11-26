@@ -164,9 +164,9 @@ static const int host_order[CTRL_HOST_COUNT] = {H(EXIT),       H(FULLSCREEN), H(
                                                 H(VOLUME_UP),  H(VOLUME_DOWN), H(SAVE_STATE), H(LOAD_STATE),
                                                 H(SLOT_1),     H(SLOT_2),     H(SLOT_3),     H(SLOT_4),
                                                 H(PAUSE),      H(FRAME_STEP), H(TURBO),      H(HUD),
-                                                H(DECK_SLOTS)};
+                                                H(DECK_SLOTS), H(RECORD_REPLAY)};
 #undef H
-static const Group host_groups[] = {{"Program", 0, 6}, {"Save states", 6, 6}, {"Speed", 12, 3}, {"Tools", 15, 2}};
+static const Group host_groups[] = {{"Program", 0, 6}, {"Save states", 6, 6}, {"Speed", 12, 3}, {"Tools", 15, 3}};
 static const List lists[2] = {{"PS1 BUTTON", pad_order, pad_groups, 5, CTRL_DEST_COUNT},
                               {"GAME", host_order, host_groups, 4, CTRL_HOST_COUNT}};
 /* The pad keys, then the Game list's (list_rect, lists). */

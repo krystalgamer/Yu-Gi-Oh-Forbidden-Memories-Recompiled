@@ -45,7 +45,8 @@ const ControlsHostAction Controls_HostActions[CTRL_HOST_COUNT] = {
     [CTRL_HOST_FRAME_STEP] = {"Frame step", "frame_step", CTRL_HOST_PRESS, CTRL_KEY_PERIOD},
     [CTRL_HOST_TURBO] = {"Turbo (hold)", "turbo", CTRL_HOST_HOLD, CTRL_KEY_TAB},
     [CTRL_HOST_HUD] = {"Debug HUD", "hud", CTRL_HOST_PRESS, CTRL_KEY_F3},
-    [CTRL_HOST_DECK_SLOTS] = {"Deck slots", "deck_slots", CTRL_HOST_PRESS, CTRL_KEY_F6}};
+    [CTRL_HOST_DECK_SLOTS] = {"Deck slots", "deck_slots", CTRL_HOST_PRESS, CTRL_KEY_F6},
+    [CTRL_HOST_RECORD_REPLAY] = {"Record replay", "record_replay", CTRL_HOST_PRESS, CTRL_KEY_F8}};
 /* CTRL_DEST_COUNT is 16 because the PS1 digital pad has 16 active bits
  * (0x0001 .. 0x8000, 0x0000 carries no action). The list above must always
  * line up with that; the test suite asserts the match. */

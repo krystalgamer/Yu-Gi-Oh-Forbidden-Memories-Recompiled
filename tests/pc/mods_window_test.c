@@ -60,6 +60,7 @@ int Platform_OpenFolder(const char *path)
     snprintf(opened, sizeof(opened), "%s", path);
     return 0;
 }
+void Recorder_HostAction(const char *what) { (void)what; } /* recorder.h: no replay records here */
 int Platform_RestartGame(void)
 {
     restarts++;

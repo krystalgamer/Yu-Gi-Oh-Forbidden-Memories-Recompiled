@@ -78,6 +78,7 @@ typedef enum {
     CTRL_HOST_TURBO,
     CTRL_HOST_HUD,
     CTRL_HOST_DECK_SLOTS,
+    CTRL_HOST_RECORD_REPLAY,
     CTRL_HOST_COUNT
 } CtrlHostAction;
 /* Press actions fire once per press, hold actions last while held, repeat

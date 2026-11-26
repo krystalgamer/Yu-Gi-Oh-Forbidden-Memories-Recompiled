@@ -454,6 +454,66 @@ static int picked_zip(char *path, size_t size, char *why, size_t why_size)
     return 1;
 }
 #endif
+#ifndef SDL_PLATFORM_ANDROID
+/* File > Play replay... (menu.c): the system's file dialog, from the
+ * user folder's replays/, answered on its own thread as the zip one is. */
+static struct {
+    SDL_AtomicInt done;
+    int result;
+    char path[1024], error[256];
+} replay_pick;
+static int replay_picking;
+static void SDLCALL replay_selected(void *userdata, const char *const *list, int filter)
+{
+    (void)userdata;
+    (void)filter;
+    if (!list) {
+        snprintf(replay_pick.error, sizeof(replay_pick.error), "%s", SDL_GetError());
+        replay_pick.result = -1;
+    } else if (list[0] && strlen(list[0]) < sizeof(replay_pick.path)) {
+        snprintf(replay_pick.path, sizeof(replay_pick.path), "%s", list[0]);
+        replay_pick.result = 1;
+    } else if (list[0]) {
+        snprintf(replay_pick.error, sizeof(replay_pick.error), "That file's name is too long.");
+        replay_pick.result = -1;
+    }
+    SDL_SetAtomicInt(&replay_pick.done, 1);
+}
+void Platform_ChooseReplay(void)
+{
+    static const SDL_DialogFileFilter replays[] = {{"Replay (.yfmreplay)", "yfmreplay"}};
+    static char folder[1024];
+    if (replay_picking) return;
+    memset(&replay_pick, 0, sizeof(replay_pick));
+    replay_picking = 1;
+    if (Paths_User(folder, sizeof(folder), "replays/.folder") == 0) {
+        char *slash = strrchr(folder, '/');
+        if (slash) *slash = '\0'; /* replays/, made if it was not there */
+    } else {
+        folder[0] = '\0';
+    }
+    SDL_ShowOpenFileDialog(replay_selected, NULL, window, replays, 1, folder[0] ? folder : NULL, false);
+}
+int Platform_ChosenReplay(char *path, size_t size, char *why, size_t why_size)
+{
+    if (!replay_picking || !SDL_GetAtomicInt(&replay_pick.done)) return 0;
+    replay_picking = 0;
+    if (replay_pick.result < 0) {
+        snprintf(why, why_size, "Could not open the file picker: %s", replay_pick.error);
+        return -2;
+    }
+    if (!replay_pick.result) return -1;
+    snprintf(path, size, "%s", replay_pick.path);
+    return 1;
+}
+#else
+void Platform_ChooseReplay(void) {}
+int Platform_ChosenReplay(char *path, size_t size, char *why, size_t why_size)
+{
+    (void)path, (void)size, (void)why, (void)why_size;
+    return 0;
+}
+#endif
 static int panel_overlay(void);
 static void open_panel(int kind);
 static int mods_read_clipboard(char *out, size_t capacity)

@@ -216,7 +216,7 @@ int main(void)
     assert(ControlsRuntime_Config()->kb.src[0][0].kind != CTRL_SRC_UNBOUND);
 
     /* The Game list is a list of its own, drawn apart from the pad's, and
-     * the arrows stay in it: Exit game is first, Deck slots last. */
+     * the arrows stay in it: Exit game is first, Record replay last. */
     select_row(CTRL_ROW_EXIT, 0);
     ControlsWindow_Draw(&c);
     assert(list_rect[1].w && list_rect[1].y != list_rect[0].y);
@@ -225,7 +225,7 @@ int main(void)
     assert(ui.row == CTRL_DEST_COUNT + CTRL_HOST_FULLSCREEN);
     ControlsWindow_Key(CTRL_KEY_ARROW_UP, 1, 0, 0);
     ControlsWindow_Key(CTRL_KEY_ARROW_UP, 1, 0, 0);
-    assert(ui.row == CTRL_DEST_COUNT + CTRL_HOST_DECK_SLOTS && ui.host_scroll == ui.host_scroll_max);
+    assert(ui.row == CTRL_DEST_COUNT + CTRL_HOST_RECORD_REPLAY && ui.host_scroll == ui.host_scroll_max);
     /* The wheel scrolls the list under the pointer. */
     MenuEvent over = {.type = MENU_EVENT_MOTION, .x = list_rect[1].x + 20, .y = list_rect[1].y + 40};
     MenuEvent up = {.type = MENU_EVENT_WHEEL, .wheel = 1};

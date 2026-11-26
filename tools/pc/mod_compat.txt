@@ -205,3 +205,13 @@ accept v0.3.0 record SoftGpuRecorder grew by the patch callback at its end
 accept v0.1.2 record MenuEvent grew by modifiers at its end
 accept v0.2.0 record MenuEvent grew by modifiers at its end
 accept v0.3.0 record MenuEvent grew by modifiers at its end
+# Record replay (#523): the Game list gained its F8 row at its end, so every
+# controls profile's host bindings grew by one, which moves what follows a
+# profile. As for v0.1.2's above: no released mod imports a Controls or
+# ControlsRuntime name, and controls.txt names the actions by token.
+accept v0.2.0 record ControlsProfile grew by the Record replay binding at its end
+accept v0.2.0 record ControlsDeviceProfile holds the larger ControlsProfile
+accept v0.2.0 record ControlsConfig holds the larger ControlsProfile
+accept v0.3.0 record ControlsProfile grew by the Record replay binding at its end
+accept v0.3.0 record ControlsDeviceProfile holds the larger ControlsProfile
+accept v0.3.0 record ControlsConfig holds the larger ControlsProfile
