@@ -2184,6 +2184,8 @@ static void replay_not_played(const char *why)
 }
 
 /* The file File > Play replay... chose: the game restarts into it. */
+static char replay_chosen[1024];
+
 static void play_replay(const char *file)
 {
     char why[sizeof(notice.text)];
@@ -2202,9 +2204,30 @@ static void stop_replay_chosen(int button, int *quit)
         replay_not_played("The game could not restart itself. Start it again to go back to the title.");
 }
 
-/* Record replay from boot...: asked first, as Restart game and Stop replay
- * do (File > Play replay... restarts without asking). The restart records
- * from the next start's first frame (Recorder_BootRequest). */
+/* Its question answered (play_replay_ask). */
+static void play_replay_chosen(int button, int *quit)
+{
+    (void)quit;
+    if (button == 0) play_replay(replay_chosen);
+}
+
+/* Once the file is chosen: asked, as Game > Restart game is, since the
+ * restart drops unsaved progress. The dialog runs on its own thread while
+ * the game plays on, so a tower's duel (Tower_Guard) is asked about again
+ * here, before the question, as well as at the click. */
+static void play_replay_ask(const char *file)
+{
+    static const char *const buttons[] = {"Restart and play", "Cancel"};
+    if (Tower_Guard(TOWER_GUARD_JUMP, 1, NULL, 0)) return;
+    snprintf(replay_chosen, sizeof(replay_chosen), "%s", file);
+    /* Cancel is focused and last, so Enter and Escape both keep playing. */
+    Menu_ShowNotice("Play replay", "Restart the game and play the replay? Unsaved progress is lost.", buttons, 2, 1,
+                    play_replay_chosen);
+}
+
+/* Record replay from boot...: asked first, as Restart game, Stop replay and
+ * Play replay... do. The restart records from the next start's first frame
+ * (Recorder_BootRequest). */
 static void record_boot_chosen(int button, int *quit)
 {
     char why[sizeof(notice.text)];
@@ -2240,7 +2263,7 @@ static void update_replay_items(void)
         Menu_ShowNotice(title, text, ok, 1, 0, NULL);
     }
     switch (Platform_ChosenReplay(chosen, sizeof(chosen), text, sizeof(text))) {
-    case 1: play_replay(chosen); break;
+    case 1: play_replay_ask(chosen); break;
     case -2: replay_not_played(text); break;
     default: break;
     }
@@ -2255,7 +2278,10 @@ static void activate(const Item *item, int *quit)
     switch (item->id) {
 #ifndef __ANDROID__
     case ACT_RECORD_REPLAY: HostActions_ToggleRecording(); break;
-    case ACT_PLAY_REPLAY: Platform_ChooseReplay(); break;
+    case ACT_PLAY_REPLAY:
+        /* A restart: a tower's duel is not left by one, asked before the dialog (and its question). */
+        if (!Tower_Guard(TOWER_GUARD_JUMP, 1, NULL, 0)) Platform_ChooseReplay();
+        break;
     case ACT_RECORD_BOOT: {
         static const char *const buttons[] = {"Restart and record", "Cancel"};
         /* A restart: a tower's duel is not left by one (Tower_Guard, with its notice), asked before the question. */
