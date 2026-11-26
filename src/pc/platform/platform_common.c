@@ -124,6 +124,7 @@ static int stepped_wanted;                    /* a replay asked for it */
 static int stepped_by_request;                /* stepped_mixer is thread_mix through the FIFO */
 static AudioFifoGate fifo_gate;               /* the threads play the FIFO, or mix (fifo.h) */
 static AudioFifo audio_fifo;
+static int sink_drains;                       /* the silent sink's thread drains it, not a device */
 
 static void mix_owe(unsigned us)
 {
@@ -760,17 +761,46 @@ static void nap_before_due(void)
 }
 #endif
 
+/* Whether the FIFO's fill paces the game (fifo.h, AudioFifo_PacePeriod):
+ * while a device plays the stepped mixer's frames, at 100 %. Not the silent
+ * sink's thread (no device: MEMORIES_NO_AUDIO, none found), whose nanosleep
+ * drains slower than real time and would only slow a game nobody hears. */
+static int fifo_paces(void)
+{
+    return stepped_by_request && !sink_drains && rate == 100;
+}
+
 /* The virtual clock in a window (MEMORIES_DETERMINISTIC=1 without
  * MEMORIES_HEADLESS), before a VBlank: paused, nothing moves until the pause
  * ends or a frame step lets one VBlank through; running, the VBlank waits
  * for its real time at the game speed. It only sleeps and pumps the
- * window's events, so the game sees the same as uncapped. */
+ * window's events, so the game sees the same as uncapped.
+ *
+ * While a replay records or plays, a device plays the frames the game mixed
+ * from the FIFO, and at 100 % its fill moves the grid (fifo_paces): each
+ * period is nudged by at most 1/128 toward AUDIO_FIFO_TARGET, and a VBlank
+ * late after a stall does not catch up while the fill is above it, so the
+ * latency stays near 70 ms instead of growing by each stall's silence, and a
+ * device clock a little off real time sets the pace instead of drifting the
+ * fill into skips or underruns. It reads the FIFO's two counts and writes
+ * only pace_next: when the host sleeps, never what the game sees. Under it:
+ * - Turbo (400 %) and any other speed keep the plain grid: the game mixes
+ *   faster or slower than the device plays, and the device skips past
+ *   AUDIO_FIFO_MOST or runs dry, as before.
+ * - Paused (0 %), nothing is mixed: the device fades out and plays silence
+ *   until AUDIO_FIFO_PRIME frames are queued again.
+ * - A frame step lets one VBlank's frames (about 735) through; every third
+ *   step or so primes the device for a short burst. Neither reaches the rule
+ *   (the rate is 0) and the grid starts again after either.
+ * - A control client steps the game itself: pace() does nothing then (and
+ *   headless, nothing is paced), so the rule is off with it; the silent
+ *   sink's thread, the one draining a headless client's FIFO, never paces. */
 static void pace(void)
 {
 #ifndef _WIN32
     struct timespec nap = {0, 500000};
 #endif
-    uint64_t now;
+    uint64_t now, period;
     if (!deterministic_paced || controlled) return;
     while (rate == 0 && !step_pending && !Platform_ShouldQuit()) {
         deterministic_last_wait = now_us(); /* waiting, not spinning (advance) */
@@ -787,8 +817,14 @@ static void pace(void)
         pace_next = 0;
         return;
     }
+    period = (uint64_t)vblank_period * 100u / (unsigned)rate;
     now = now_us();
     if (!pace_next || now > pace_next + 100000u) pace_next = now; /* a stall: start the grid again */
+    if (fifo_paces()) {
+        int catch_up;
+        period = AudioFifo_PacePeriod(AudioFifo_Queued(&audio_fifo), period, &catch_up);
+        if (!catch_up && pace_next < now) pace_next = now; /* late, but the sound is queued: no VBlanks back to back */
+    }
     while (now < pace_next) {
 #ifdef _WIN32
         sleep_toward(now, pace_next, ~0u);
@@ -798,7 +834,7 @@ static void pace(void)
 #endif
         now = now_us();
     }
-    pace_next += (uint64_t)vblank_period * 100u / (unsigned)rate;
+    pace_next += period;
 }
 
 void Platform_PollTime(void)
@@ -1053,6 +1089,7 @@ int Platform_StartSilentAudio(void (*mix)(int16_t *, size_t), const char *dump_p
         return 0;
     }
 #endif
+    sink_drains = 1; /* no device's clock for the pacer to follow (fifo_paces) */
     Platform_AudioThreadStarted(mix);
     /* The timer signal is the game's interrupt and must stay on the main thread. */
     sigfillset(&all);

@@ -18,6 +18,12 @@
  * the last frame out, and where it plays again it fades in, each over
  * AUDIO_FIFO_FADE frames (AudioFifo_Fade): no hard cut to zero and back.
  *
+ * The virtual clock's pacer keeps the fill near AUDIO_FIFO_TARGET at 100 %
+ * (AudioFifo_PacePeriod, platform_common.c's pace()): the device's clock,
+ * not the host's, then sets the game's pace, so the latency neither creeps
+ * up after a stall nor drifts with a device whose clock runs a little fast
+ * or slow.
+ *
  * Header only, so the game's backends and CTest (tests/pc/audio_fifo_test.c)
  * build the same code. Stereo frames of two int16_t. */
 #include <stddef.h>
@@ -29,6 +35,8 @@
 #define AUDIO_FIFO_PRIME 2048u   /* 46 ms queued before sound starts again */
 #define AUDIO_FIFO_MOST 6144u    /* 139 ms queued at most: the rest is skipped */
 #define AUDIO_FIFO_FADE 64u      /* 1.5 ms of fade out where the queue runs dry, and in where it plays again */
+#define AUDIO_FIFO_TARGET 3072u  /* 70 ms: the fill the pacer keeps (AudioFifo_PacePeriod) */
+#define AUDIO_FIFO_BAND 512u     /* 12 ms either side of it where the pacer leaves the period alone */
 
 typedef struct {
     int16_t frames[AUDIO_FIFO_FRAMES * 2];
@@ -57,6 +65,13 @@ static inline uint32_t AudioFifo_Underruns(const AudioFifo *fifo)
 static inline uint32_t AudioFifo_Skipped(const AudioFifo *fifo)
 {
     return __atomic_load_n(&fifo->skipped, __ATOMIC_RELAXED);
+}
+
+/* Frames queued, for either side (the producer's pacer, the HUD). */
+static inline uint32_t AudioFifo_Queued(const AudioFifo *fifo)
+{
+    uint32_t tail = __atomic_load_n(&fifo->tail, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&fifo->head, __ATOMIC_ACQUIRE) - tail;
 }
 
 /* Producer: the frames just mixed. */
@@ -131,6 +146,25 @@ static inline void AudioFifo_Fade(AudioFifo *fifo, int16_t *out, size_t take, si
         out[i * 2 + 1] = (int16_t)(fifo->last[1] * (int32_t)level / (int32_t)AUDIO_FIFO_FADE);
     }
     fifo->level = level;
+}
+
+/* The pacer's rule (platform_common.c, pace()), for a game at 100 % whose
+ * FIFO a device drains: the real time to the VBlank after this one, from
+ * `period` us at the game speed and `queued` frames, and whether a VBlank
+ * already late may still come at once to catch up (*catch_up). Above the
+ * band the period grows by 1/128, below it shrinks by as much, so the game
+ * makes a little less or more sound than the device plays until the fill is
+ * back near AUDIO_FIFO_TARGET; above the target a late VBlank does not
+ * catch up, since what a stall left behind is already queued. Past
+ * AUDIO_FIFO_MOST no device is draining (its pop would have skipped): the
+ * plain grid, as without the FIFO. It only changes when the host sleeps. */
+static inline uint64_t AudioFifo_PacePeriod(uint32_t queued, uint64_t period, int *catch_up)
+{
+    *catch_up = queued <= AUDIO_FIFO_TARGET || queued > AUDIO_FIFO_MOST;
+    if (queued > AUDIO_FIFO_MOST) return period;
+    if (queued > AUDIO_FIFO_TARGET + AUDIO_FIFO_BAND) return period + period / 128u;
+    if (queued + AUDIO_FIFO_BAND < AUDIO_FIFO_TARGET) return period - period / 128u;
+    return period;
 }
 
 /* The device thread's switch between this FIFO and its own mixer. A thread

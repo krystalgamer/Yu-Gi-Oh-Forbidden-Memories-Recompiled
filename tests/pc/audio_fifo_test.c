@@ -26,7 +26,11 @@
  *     (a pop that empties it exactly, then pops that find nothing) the last
  *     frame fades out over as many, then silence; a queue that plays again in
  *     the middle of a fade-out fades in from where it stood.
- */
+ *  5. The pacer's rule (AudioFifo_PacePeriod, as platform_common.c's pace()
+ *     applies it): a simulated game paced to the VBlank grid against a device
+ *     that pops 256 frames at a time, its clock off real time by up to 0.3 %,
+ *     with stalls of 50 and 90 ms. The fill the pacer sees must come back to
+ *     AUDIO_FIFO_TARGET's band and stay there, with no skip. */
 #include "pc/audio/fifo.h"
 #include "pc/audio/replace.h"
 #include "pc/audio/spu.h"
@@ -389,6 +393,91 @@ static int fade_check(void)
     return fade_failed;
 }
 
+/* --- the pacer's rule ------------------------------------------------------------- */
+
+/* A minute of a game paced to the VBlank grid as pace() paces it (16683 us
+ * at 100 %; a stall over 100 ms starts the grid again), each VBlank's frames
+ * mixed just before it, against a device that pops 256 frames every 5.8 ms
+ * of its own clock, `drift` ppm fast. Frames take 4 to 10 ms on the host;
+ * stalls of 50 and 90 ms come at 20 s and 40 s, the second long enough to
+ * run the device dry. The fill the pacer sees, from 10 s to 20 s after the
+ * start and after each stall, goes into *low and *high. Returns the fill at
+ * the end. */
+static uint32_t pace_run(int rule, long drift, unsigned *low, unsigned *high, unsigned *skips)
+{
+    static int16_t frames[1024 * 2], out[256 * 2];
+    const uint64_t period0 = 16683;
+    uint64_t now = 0, pace_next = 0;
+    double device_step = 256.0 * 1e6 / 44100.0 / (1.0 + drift / 1e6), device_due = 0;
+    uint32_t fraction = 0, queued = 0;
+    unsigned n;
+    memset(frames, 0, sizeof(frames));
+    AudioFifo_Reset(&fifo);
+    *low = ~0u;
+    *high = 0;
+    for (n = 0; n < 60u * 60u; n++) {
+        uint64_t period = period0, work = 4000 + (n * 7919u) % 6000;
+        uint32_t total, owed;
+        if (n == 20u * 60u) work += 50000;
+        if (n == 40u * 60u) work += 90000;
+        now += work;
+        while (device_due <= (double)now) {
+            AudioFifo_Pop(&fifo, out, 256);
+            device_due += device_step;
+        }
+        total = fraction + 441u * (uint32_t)period0;
+        owed = total / 10000u;
+        fraction = total % 10000u;
+        AudioFifo_Push(&fifo, frames, owed);
+        /* pace() */
+        if (!pace_next || now > pace_next + 100000u) pace_next = now;
+        queued = AudioFifo_Queued(&fifo);
+        if (rule) {
+            int catch_up;
+            period = AudioFifo_PacePeriod(queued, period, &catch_up);
+            if (!catch_up && pace_next < now) pace_next = now;
+        }
+        if (n % 1200u >= 600u) {
+            if (queued < *low) *low = queued;
+            if (queued > *high) *high = queued;
+        }
+        if (now < pace_next) now = pace_next;
+        pace_next += period;
+    }
+    *skips = AudioFifo_Skipped(&fifo);
+    return queued;
+}
+
+static int pace_check(void)
+{
+    static const long drifts[] = {0, 50, -50, 3000, -3000};
+    unsigned i;
+    int failed = 0;
+    for (i = 0; i < sizeof(drifts) / sizeof(*drifts); i++) {
+        unsigned low, high, skips, plain_low, plain_high, plain_skips;
+        uint32_t end = pace_run(1, drifts[i], &low, &high, &skips);
+        uint32_t plain = pace_run(0, drifts[i], &plain_low, &plain_high, &plain_skips);
+        printf("audio_fifo_test: pacer, device %+ld ppm: fill %u..%u (end %u), %u skipped; without the rule %u..%u "
+               "(end %u), %u skipped\n",
+               drifts[i], low, high, end, skips, plain_low, plain_high, plain, plain_skips);
+        /* The band, give or take one device pop. */
+        if (low + 256u + AUDIO_FIFO_BAND < AUDIO_FIFO_TARGET || high > AUDIO_FIFO_TARGET + AUDIO_FIFO_BAND + 256u ||
+            skips) {
+            fprintf(stderr, "audio_fifo_test: the pacer kept the fill at %u..%u (%u skipped), not near %u\n", low,
+                    high, skips, AUDIO_FIFO_TARGET);
+            failed = 1;
+        }
+        /* And the run is one that needs it: without the rule, the stall that
+         * ran the device dry left the fill higher (the latency's creep). */
+        if (!drifts[i] && plain_high <= AUDIO_FIFO_TARGET + AUDIO_FIFO_BAND + 256u) {
+            fprintf(stderr, "audio_fifo_test: without the rule the fill stayed at %u..%u: the stalls tried nothing\n",
+                    plain_low, plain_high);
+            failed = 1;
+        }
+    }
+    return failed;
+}
+
 int main(void)
 {
     uint64_t alone, steady, greedy;
@@ -404,5 +493,6 @@ int main(void)
     }
     if (order_check()) return 1;
     if (churn_check()) return 1;
-    return fade_check();
+    if (fade_check()) return 1;
+    return pace_check();
 }
