@@ -215,3 +215,5 @@ accept v0.2.0 record ControlsConfig holds the larger ControlsProfile
 accept v0.3.0 record ControlsProfile grew by the Record replay binding at its end
 accept v0.3.0 record ControlsDeviceProfile holds the larger ControlsProfile
 accept v0.3.0 record ControlsConfig holds the larger ControlsProfile
+accept v0.2.0 variable Controls_HostActions grew by the Record replay row at its end
+accept v0.3.0 variable Controls_HostActions grew by the Record replay row at its end

@@ -924,6 +924,8 @@ def write_sdk(build, target="i386"):
         relative = os.path.relpath(header, "src")
         if relative.startswith(os.path.join("pc", "compat", "android")):
             continue   # the Android build's own stand-ins for system headers, not the game's
+        if relative == os.path.join("pc", "audio", "fifo.h"):
+            continue   # the host's audio FIFO (threads, nanosleep): it needs a system libc, which a mod's has not
         if relative.startswith(os.path.join("pc", "mods", "sdk")):
             relative = os.path.join("libc", os.path.relpath(header, "src/pc/mods/sdk"))
         copy_if_changed(header, os.path.join(sdk, "include", relative))
