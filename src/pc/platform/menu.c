@@ -103,7 +103,7 @@ enum {
     SLIDER_MASTER, SLIDER_MUSIC, SLIDER_SFX, CHECK_MUTE,
     CHECK_HUD, CHECK_HUD_FULL, RADIO_STATE_SLOT, ACT_UNLOCK_FREE_DUELISTS, ACT_RESET_COLOR,
     ACT_CHECK_UPDATES, ACT_RELEASES, ACT_VERSION, ACT_SET_STARCHIPS, RADIO_LANGUAGE, ACT_SYSTEM_INFO, ACT_JUMP,
-    ACT_RECORD_REPLAY, ACT_PLAY_REPLAY, ACT_STOP_REPLAY,
+    ACT_RECORD_REPLAY, ACT_PLAY_REPLAY, ACT_STOP_REPLAY, ACT_RECORD_BOOT,
     CHECK_TRACE = 300  /* value is a LogChannel */
 };
 
@@ -137,13 +137,13 @@ enum { SUB_SCALE, SUB_MENU_SIZE, SUB_SPEED, SUB_FPS, SUB_CHEATS, SUB_TRACE, SUB_
 #define VIDEO_ITEMS 15
 #endif
 /* Replays (notes/replays.md) are the desktop's: File > Play replay... and
- * Stop replay, Game > Record replay. */
+ * Stop replay, Game > Record replay and Record replay from boot... */
 #ifdef __ANDROID__
 #define FILE_ITEMS 10
 #define GAME_ITEMS 11
 #else
 #define FILE_ITEMS 12
-#define GAME_ITEMS 12
+#define GAME_ITEMS 13
 #endif
 static Menu menus[MENU_COUNT] = {
     {"File", {{"Save state", "F5", ITEM_ACTION, ACT_SAVE_STATE, -1},
@@ -200,6 +200,7 @@ static Menu menus[MENU_COUNT] = {
               {"Language", 0, ITEM_SUBMENU, 0, -1, SUB_LANGUAGE},
 #ifndef __ANDROID__
               {"Record replay", 0, ITEM_ACTION, ACT_RECORD_REPLAY, -1, 0, ITEM_GROUP_BREAK},
+              {"Record replay from boot...", 0, ITEM_ACTION, ACT_RECORD_BOOT, -1},
 #endif
               {"Restart game...", 0, ITEM_ACTION, MENU_ITEM_RESTART, -1, 0, ITEM_GROUP_BREAK | ITEM_DISABLED}}, GAME_ITEMS},
     {"View", {{"Fusion helper", 0, ITEM_CHECK, 0, SET_FUSION_HELPER},
@@ -2200,6 +2201,20 @@ static void stop_replay_chosen(int button, int *quit)
     if (button == 0 && Platform_RestartGame() < 0)
         replay_not_played("The game could not restart itself. Start it again to go back to the title.");
 }
+
+/* Record replay from boot...: asked first, as Restart game and Stop replay
+ * do (File > Play replay... restarts without asking). The restart records
+ * from the next start's first frame (Recorder_BootRequest). */
+static void record_boot_chosen(int button, int *quit)
+{
+    char why[sizeof(notice.text)];
+    (void)quit;
+    if (button != 0) return;
+    if (Recorder_BootRequest(NULL, why, sizeof(why)) || Recorder_BootRestart(why, sizeof(why))) {
+        static const char *const ok[] = {"OK"};
+        Menu_ShowNotice("Recording not started", why, ok, 1, 0, NULL);
+    }
+}
 #endif
 
 /* The replay rows as the recorder is, and its notices. */
@@ -2216,6 +2231,8 @@ static void update_replay_items(void)
                 item->flags = (item->flags & ~ITEM_DISABLED) | (replay ? ITEM_DISABLED : 0);
             } else if (item->id == ACT_STOP_REPLAY) {
                 item->flags = (item->flags & ~ITEM_DISABLED) | (replay ? 0 : ITEM_DISABLED);
+            } else if (item->id == ACT_RECORD_BOOT) {
+                item->flags = (item->flags & ~ITEM_DISABLED) | (replay || recording ? ITEM_DISABLED : 0);
             }
         }
     if (!notice.shown && Recorder_TakeNotice(title, sizeof(title), text, sizeof(text))) {
@@ -2239,6 +2256,15 @@ static void activate(const Item *item, int *quit)
 #ifndef __ANDROID__
     case ACT_RECORD_REPLAY: HostActions_ToggleRecording(); break;
     case ACT_PLAY_REPLAY: Platform_ChooseReplay(); break;
+    case ACT_RECORD_BOOT: {
+        static const char *const buttons[] = {"Restart and record", "Cancel"};
+        /* Cancel is focused and last, so Enter and Escape both keep playing. */
+        Menu_ShowNotice("Record replay from boot",
+                        "Restart the game and record a replay from its first frame? Unsaved progress is lost. "
+                        "The replay holds none of the game's data, only what you press and your saves as they "
+                        "are now.", buttons, 2, 1, record_boot_chosen);
+        break;
+    }
     case ACT_STOP_REPLAY: {
         static const char *const buttons[] = {"Back to the title", "Cancel"};
         Menu_ShowNotice("Stop replay", "Stop the replay and go back to the title? The game restarts.", buttons, 2, 0,
