@@ -25,9 +25,20 @@ When a recording starts:
   and the sound device plays those frames from a queue (`src/pc/audio/fifo.h`)
   instead of mixing them itself. The game's sound driver reads the voices'
   levels, so where the device's thread mixed, a device that asked a little
-  earlier or later changed the game. The queue adds 46 to 139 ms of
-  latency; at Turbo the device skips what it cannot play; while paused it
-  plays silence.
+  earlier or later changed the game. At 100 % the queue's fill paces the
+  game (`pace()`, `AudioFifo_PacePeriod`): each VBlank's period is nudged
+  by at most 1/128 toward about 70 ms queued (3072 frames, ±512), and a
+  frame late after a stall does not catch up while the queue is above
+  that, so the latency neither creeps up after stalls nor drifts with a
+  device whose clock is a little off. Only when the host sleeps changes:
+  the game sees the same. It is off with no device (the silent sink) and
+  under a control client, which steps the game itself. At Turbo the device
+  skips what it cannot play (past 139 ms); while paused it plays silence.
+  Where the queue runs dry (a stall, a pause) the last frame fades out over
+  64 frames (1.5 ms), and the sound fades in as long when it comes back,
+  instead of cutting to zero and back (`AudioFifo_Fade`: the device's side
+  only). The HUD's audio line then shows the queue's own numbers: the
+  fill in ms, its underruns and the frames skipped.
 - A **start state** is taken and loaded at once (a short hitch), so the
   recording begins exactly as its playback will, with only what a state
   holds.
@@ -45,7 +56,8 @@ It is menu-only (no key, so the Controls list does not grow) and not on
 Android, like the other replay items. It asks first, as Game > Restart game
 and File > Stop replay do ("Restart the game and record a replay from its
 first frame? Unsaved progress is lost."; Cancel is the default): a restart
-drops what is not saved. (File > Play replay... restarts without asking.)
+drops what is not saved; File > Play replay... asks the same once its file is
+chosen.
 The restart is the one that item uses (`Platform_RestartGame`); the name of
 the new file is left in `replays/next-record.txt`, as Play replay leaves its
 file's in `next.txt`, and the next start takes it (`Recorder_Init`) and
@@ -63,12 +75,17 @@ settings and the mods that were on.
 ## Playing
 
 **File > Play replay...** picks a `.yfmreplay` and restarts the game into
-it. The window and the sound are on; the player's pads and keys do not reach
-the game (the replay's do). Pause (P), Frame step (`.`) and Turbo (Tab) work.
-At its end the game pauses and says so; **File > Stop replay** goes back to
-the title (the game restarts). Agents and tests play one with
-`MEMORIES_PLAY=file.yfmreplay`, which ends the game at the replay's end when
-headless.
+it, once asked ("Restart the game and play the replay? Unsaved progress is
+lost."; Cancel is the default), as the other restarts are; in a tower's duel
+it is refused with the tower's notice, as they are. The window and the sound
+are on; the player's pads and keys do not reach the game (the replay's do).
+Pause (P), Frame step (`.`) and Turbo (Tab) work. At its end the game pauses
+and says so; **File > Stop replay** goes back to the title (the game
+restarts). Agents and tests play one with `MEMORIES_PLAY=file.yfmreplay`,
+which ends the game at the replay's end when headless or when
+`MEMORIES_CONTROL` is set (a control client gets no answer from a pause; the
+menu's restart never carries `MEMORIES_CONTROL`). The control channel has no
+play command.
 
 **A replay never writes the player's saves.** It is unpacked into the user
 folder's `replays/.playing/`, and for as long as the game runs its
