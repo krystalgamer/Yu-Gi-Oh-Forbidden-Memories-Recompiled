@@ -2258,6 +2258,8 @@ static void activate(const Item *item, int *quit)
     case ACT_PLAY_REPLAY: Platform_ChooseReplay(); break;
     case ACT_RECORD_BOOT: {
         static const char *const buttons[] = {"Restart and record", "Cancel"};
+        /* A restart: a tower's duel is not left by one (Tower_Guard, with its notice), asked before the question. */
+        if (Tower_Guard(TOWER_GUARD_JUMP, 1, NULL, 0)) break;
         /* Cancel is focused and last, so Enter and Escape both keep playing. */
         Menu_ShowNotice("Record replay from boot",
                         "Restart the game and record a replay from its first frame? Unsaved progress is lost. "

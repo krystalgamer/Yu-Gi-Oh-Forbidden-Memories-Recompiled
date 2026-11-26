@@ -12,6 +12,7 @@
 #include "pc/platform/menu.h"
 #include "pc/platform/settings.h"
 #include "pc/sdk/display.h"
+#include "pc/tower/tower.h"
 #include <png.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -462,7 +463,12 @@ static int handle(char *text)
         return 0;
     case CONTROL_RECORD_BOOT:
         /* The game restarts and records from its first frame: no client
-         * follows, so the "ok" goes out before. */
+         * follows, so the "ok" goes out before. A restart, so a tower's duel
+         * refuses it as it refuses a jump (the client is the one told). */
+        if (Tower_Guard(TOWER_GUARD_JUMP, 0, error, sizeof(error))) {
+            send_error(error);
+            return 0;
+        }
         if (Recorder_BootRequest(command.path, error, sizeof(error))) {
             send_error(error);
             return 0;
