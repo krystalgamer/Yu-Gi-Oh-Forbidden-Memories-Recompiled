@@ -105,7 +105,8 @@ on its own thread.
 ## Open question
 
 A start state holds the game's 2 MiB of RAM, which is the disc's code and
-data as the game unpacked it (and the 1 MiB of VRAM, the SPU's sound RAM):
+data as the game unpacked it (and the SPU's 512 KiB of sound RAM, among the
+rest; a start state is about 7.6 MB, 1.2 MB once zipped):
 a shared replay carries part of the game with it. The repository's own
 replays (`tests/pc/replays`) start from boot for that reason. Should a
 player's replay start from boot instead (slower to reach the moment, and
