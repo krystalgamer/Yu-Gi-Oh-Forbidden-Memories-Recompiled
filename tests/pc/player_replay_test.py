@@ -23,9 +23,20 @@ Headless, on the virtual clock, with SDL's dummy sound:
      restarts and records from its first frame. The .yfmreplay has no start
      state at all (replay.json says the start is boot) and still carries the
      player's progress; the channel refuses it while a recording runs and for
-     a name that is not a .yfmreplay. Its play, by File > Play replay...'s own
-     path (MEMORIES_PLAY), has every frame hash as recorded and leaves the
-     player's saves as they were.
+     a name that is not a .yfmreplay. Its play, through MEMORIES_PLAY, has
+     every frame hash as recorded and leaves the player's saves as they were.
+  6. A leftover marker is no order: replays/next-record.txt and next.txt of
+     the older format (no time) or made long ago are dropped and removed, and
+     nothing records or plays from them.
+
+What this does not cover. MEMORIES_PLAY is the environment's way into the
+same unpack, progress folder and playback that File > Play replay... reaches
+through replays/next.txt (and the restart it makes); the test reaches it only
+by the variable, headless, on the virtual clock. Not covered here: the menu
+item and its question, a windowed game's clock (pacing, the pause at the end),
+the audio FIFO and its device, the tower guards of a restart, and the notices.
+A fresh marker's restart is covered for Record replay from boot... (item 5)
+and not for Play replay...
 """
 from __future__ import annotations
 
@@ -114,6 +125,25 @@ def from_boot(work: Path) -> None:
     run_game(environment(work / "boot-play-user", MEMORIES_PLAY=str(recording), MEMORIES_RECORD=str(played)),
              work / "boot-play.log")
     assert checked(folder, played, "from boot") > 500
+
+
+def stale_markers(work: Path) -> None:
+    """A marker a restart left and nobody took is dropped, not obeyed: next-record.txt of the older format
+    (the file only, no time) and next.txt made at the epoch. The game starts as usual, says so, removes both,
+    and neither records nor plays."""
+    user = work / "stale-user"
+    (user / "replays").mkdir(parents=True)
+    wanted = work / "stale.yfmreplay"
+    (user / "replays/next-record.txt").write_text(f"{wanted}\n")
+    (user / "replays/next.txt").write_text(f"1\n{work / 'not-played.yfmreplay'}\n")
+    log = work / "stale.log"
+    text = run_game(environment(user, MEMORIES_DUMP_FRAME="120", MEMORIES_DUMP_PATH=str(work / "stale.ppm")), log)
+    assert text.count("is a leftover") == 2, f"the leftovers were not dropped and said so; see {log}"
+    for name in ("next-record.txt", "next.txt"):
+        assert not (user / "replays" / name).exists(), f"{name} was not removed"
+    assert not wanted.exists() and "recording to" not in text, "a leftover marker started a recording"
+    assert "replay: playing" not in text, "a leftover marker started a play"
+    print("player_replay_test: leftover markers dropped, nothing recorded or played")
 
 
 def process_table() -> dict[int, tuple[int, str]]:
@@ -245,7 +275,9 @@ def record_from_boot_item(work: Path) -> Path:
 
 
 def play_from_boot_item(work: Path, file: Path) -> None:
-    """The file plays back as File > Play replay... plays it, frame for frame, on a fresh player's folder."""
+    """The file plays back through MEMORIES_PLAY, frame for frame, on a fresh player's folder: the unpack, the
+    scratch progress and the playback File > Play replay... also uses. Not the menu item, its restart through
+    next.txt, a window's clock, the FIFO or the tower guards (see the module's note)."""
     user = work / "boot-listener"
     (user / "saves").mkdir(parents=True)
     (user / "saves/slot05.sav").write_bytes(bytes(range(256)) * 32)
@@ -381,6 +413,7 @@ def main() -> int:
         play_without_touching_the_saves(work, file)
         refuse_commands(work, file)
         refuse_damaged_state(work, file)
+        stale_markers(work)
     except BaseException:
         print(f"player_replay_test: kept {work}")
         raise
