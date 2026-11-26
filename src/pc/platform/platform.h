@@ -307,6 +307,12 @@ void Platform_ControlIdle(void);
 /* The virtual clock runs (MEMORIES_DETERMINISTIC=1, or the frame-dump
  * combination): what a recording needs to be played back. */
 int Platform_VirtualClock(void);
+/* A replay records or plays (src/pc/debug/recorder.c): the virtual clock
+ * from this VSync on, or the clock the run had again. From the game thread
+ * at a VSync. The tick handler's own schedule, kept in the clock's time, is
+ * moved with it through `rebase`, given the clock's new now. */
+void Platform_SetVirtualClock(int on);
+void Platform_OnClockRebase(void (*rebase)(uint64_t now));
 /* End the game at the next VSync, as closing the window does (no prompt). */
 void Platform_RequestQuit(void);
 void Platform_SetPresentCap(int fps);

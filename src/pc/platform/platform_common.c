@@ -39,7 +39,8 @@ static void (*tick_handler)(uint64_t, uint64_t);
 static volatile int rate = 100;
 static uint64_t real_prev, virtual_now, next_vblank;
 static unsigned virtual_remainder; /* hundredths of a microsecond a rate other than 100% left over */
-static volatile unsigned vblank_period = 16683;
+#define VBLANK_PERIOD 16683 /* NTSC; a vsynced present re-phases the real-time clock's to the display */
+static volatile unsigned vblank_period = VBLANK_PERIOD;
 static volatile int step_pending;
 static float present_refresh;
 static int present_cap;           /* frames per second; 0 display refresh; -1 every frame */
@@ -65,13 +66,17 @@ static volatile int watchdog_reported;
  * the frames are then shown at the game speed (pace(), which only sleeps),
  * and pause and frame step work; headless runs flat out. */
 static int deterministic_dump, deterministic_asked, deterministic_paced;
+/* Asked for at run time (Platform_SetVirtualClock): a replay records or plays. */
+static int clock_requested;
+static int headless_run;
+static void (*clock_rebase)(uint64_t);
 static volatile uint64_t deterministic_last_wait; /* real time the game last waited for a VBlank */
 static uint64_t pace_next;                         /* real time the next paced VBlank is due */
 static int controlled;                             /* a control client decides (Platform_ControlAttach) */
 
 static int virtual_clock(void)
 {
-    return deterministic_asked || (deterministic_dump && rate == -1);
+    return deterministic_asked || clock_requested || (deterministic_dump && rate == -1);
 }
 #define DETERMINISTIC_STEP 1000
 #define DETERMINISTIC_SPIN 1000000 /* real us outside a wait before the timer steps a spinning game */
@@ -366,7 +371,8 @@ int Platform_StartTimers(void (*tick)(uint64_t, uint64_t), void (*vblank)(void))
     deterministic_dump = (getenv("MEMORIES_HEADLESS") != NULL || getenv("MEMORIES_DETERMINISTIC") != NULL) &&
                          (getenv("MEMORIES_DUMP_FRAME") != NULL || getenv("MEMORIES_DUMP_FRAMES") != NULL);
     deterministic_asked = deterministic_env();
-    deterministic_paced = deterministic_asked && getenv("MEMORIES_HEADLESS") == NULL;
+    headless_run = getenv("MEMORIES_HEADLESS") != NULL;
+    deterministic_paced = (deterministic_asked || clock_requested) && !headless_run;
     last_vsync_real = now_us();
     {
         const char *watchdog = getenv("MEMORIES_WATCHDOG");
@@ -474,6 +480,44 @@ void Platform_ControlAttach(int attached)
 int Platform_VirtualClock(void)
 {
     return virtual_clock();
+}
+
+void Platform_OnClockRebase(void (*rebase)(uint64_t))
+{
+    clock_rebase = rebase;
+}
+
+/* From the game thread at a VSync. Going virtual, what a state carries of
+ * the clock is brought into the range a load takes back (Platform_State):
+ * the VBlank owed or due within four periods, at the console's period (a
+ * vsynced present had put the display's), and the tick handler's own
+ * schedule, which ran on the host's time, moved to virtual time
+ * (Platform_OnClockRebase); going back, the other way. */
+void Platform_SetVirtualClock(int on)
+{
+    sigset_t set, previous;
+    int was;
+    sigemptyset(&set);
+    sigaddset(&set, SIGALRM);
+    sigprocmask(SIG_BLOCK, &set, &previous);
+    was = virtual_clock();
+    clock_requested = on != 0;
+    deterministic_paced = (deterministic_asked || clock_requested) && !headless_run;
+    if (tick_handler && was != virtual_clock()) {
+        uint64_t now = now_us();
+        if (virtual_clock()) {
+            vblank_period = VBLANK_PERIOD;
+            if (next_vblank && next_vblank <= virtual_now) next_vblank = virtual_now + 1;
+            if (next_vblank > virtual_now + vblank_period) next_vblank = virtual_now + vblank_period;
+            deterministic_last_wait = now;
+            pace_next = 0;
+            if (clock_rebase) clock_rebase(virtual_now);
+        } else {
+            real_prev = now;
+            if (clock_rebase) clock_rebase(now);
+        }
+    }
+    sigprocmask(SIG_SETMASK, &previous, NULL);
 }
 
 void Platform_ControlIdle(void)
