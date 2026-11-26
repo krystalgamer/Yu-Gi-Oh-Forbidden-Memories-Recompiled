@@ -54,7 +54,9 @@
  * replay (or the client's `record PATH`) starts recording at a VSync, from
  * a start state taken there and loaded at once, and Stop ends it with its E
  * line (so does a restart, which skips atexit on Windows); a .yfmreplay
- * holds it with the player's progress. File > Play replay... restarts into
+ * holds it with the player's progress. Game > Record replay from boot...
+ * restarts the game and records from its first frame instead: the same
+ * file with no start state. File > Play replay... restarts into
  * one, or MEMORIES_PLAY names it: its progress is a scratch copy, and a file
  * with a C line is refused. A host action while either runs (a state load,
  * the deck slots, a cheat, Jump to, a mod turned on or off, a client's
@@ -90,6 +92,15 @@ int Recorder_Recording(void);
 /* Game > Record replay: a new .yfmreplay in the user folder's replays/,
  * started at the next state point. Main thread. */
 void Recorder_RequestStart(void);
+/* Game > Record replay from boot... and the client's `record_boot PATH`: the
+ * game restarts and records from its first frame, so the .yfmreplay holds no
+ * start state (the player's progress is still copied in). Request names the
+ * file (PATH, a .yfmreplay, or NULL for a new one in the user folder's
+ * replays/) and leaves it for the next start: 0, or -1 with why. Restart
+ * then restarts the game (Platform_RestartGame); it returns only when that
+ * failed, -1 with why, the request taken back. Main thread. */
+int Recorder_BootRequest(const char *path, char *why, size_t why_size);
+int Recorder_BootRestart(char *why, size_t why_size);
 /* A player's replay is playing (or has ended, the game paused). */
 int Recorder_PlayingReplay(void);
 /* Something a replay cannot hold is about to happen (`what`, a phrase that

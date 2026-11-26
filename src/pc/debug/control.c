@@ -460,6 +460,16 @@ static int handle(char *text)
         owed = 0;
         send_error(error);
         return 0;
+    case CONTROL_RECORD_BOOT:
+        /* The game restarts and records from its first frame: no client
+         * follows, so the "ok" goes out before. */
+        if (Recorder_BootRequest(command.path, error, sizeof(error))) {
+            send_error(error);
+            return 0;
+        }
+        send_line("ok");
+        if (Recorder_BootRestart(error, sizeof(error))) fprintf(stderr, "memories-pc: control: record_boot: %s\n", error);
+        return 0;
     case CONTROL_QUIT:
         send_line("ok");
         detach("the client asked to quit");

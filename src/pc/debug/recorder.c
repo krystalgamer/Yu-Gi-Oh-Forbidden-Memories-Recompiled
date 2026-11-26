@@ -251,11 +251,44 @@ static int open_player_replay(const char *file, char *recording, size_t size)
     return 0;
 }
 
+/* A .yfmreplay to record from the game's first frame (Game > Record replay
+ * from boot..., which restarted the game for it): the same working folder
+ * and header as Recorder_Start's, with no start state, and the progress
+ * copied before the game reads any of it. 0, or -1 with a notice. */
+static int record_from_boot(const char *file)
+{
+    char recording_path[sizeof(out_path)], state[sizeof(out_path) + 16], why[300];
+    if (strlen(file) >= sizeof(zip_path)) {
+        notify("Recording not started", "The path is too long: %s", file, NULL);
+        return -1;
+    }
+    /* `state` names where a start state would go; none is ever written. */
+    if (ReplayFile_Begin(file, recording_path, sizeof(recording_path), state, sizeof(state), why, sizeof(why))) {
+        ReplayFile_Abandon(file);
+        notify("Recording not started", "%s", why, NULL);
+        return -1;
+    }
+    snprintf(out_path, sizeof(out_path), "%s", recording_path);
+    if (!(out = fopen(recording_path, "w"))) {
+        ReplayFile_Abandon(file);
+        notify("Recording not started", "Could not write %s.", recording_path, NULL);
+        return -1;
+    }
+    write_header(NULL);
+    snprintf(zip_path, sizeof(zip_path), "%s", file);
+    recording = 1;
+    player_record = 1;
+    fprintf(stderr, "memories-pc: record: recording to %s from boot\n", file);
+    return 0;
+}
+
 void Recorder_Init(void)
 {
-    static char next[1024], unpacked[1200];
+    static char next[1024], unpacked[1200], boot[1024];
     const char *record = getenv("MEMORIES_RECORD"), *play = getenv("MEMORIES_PLAY");
     const char *state, *every = getenv("MEMORIES_RECORD_STATES");
+    /* Taken at every start, so a request that is not honoured does not come back. */
+    int boot_asked = !ReplayFile_TakeNextRecord(boot, sizeof(boot));
     if (!(play && *play) && !ReplayFile_TakeNext(next, sizeof(next))) play = next;
     if (play && *play && ReplayFile_Is(play)) {
         if (!open_player_replay(play, unpacked, sizeof(unpacked))) playing = 1;
@@ -272,6 +305,15 @@ void Recorder_Init(void)
         } else {
             recording = 1;
             write_header(state);
+        }
+    }
+    if (boot_asked) {
+        if ((record && *record) || playing || (state && *state)) {
+            notify("Recording not started",
+                   "The game was started to record or play something else (MEMORIES_RECORD, MEMORIES_PLAY or "
+                   "MEMORIES_LOAD_STATE).", NULL, NULL);
+        } else {
+            record_from_boot(boot);
         }
     }
     states_every = every ? (unsigned)strtoul(every, NULL, 10) : 0;
@@ -562,6 +604,57 @@ void Recorder_RequestStart(void)
     } else if (!recording && !playing) {
         start_asked = 1;
     }
+#endif
+}
+
+int Recorder_BootRequest(const char *path, char *why, size_t why_size)
+{
+#ifdef __ANDROID__
+    (void)path;
+    snprintf(why, why_size, "Replays are not on Android yet.");
+    return -1;
+#else
+    char file[600];
+    if (recording || playing || player_play) {
+        snprintf(why, why_size, recording ? "Already recording." :
+                 playing ? "A replay is playing." : "A replay was played: File > Stop replay goes back to the title first.");
+        return -1;
+    }
+    if (path) {
+        if (!ReplayFile_Is(path)) {
+            snprintf(why, why_size, "A recording from boot is a .yfmreplay.");
+            return -1;
+        }
+        if (strlen(path) >= sizeof(file)) {
+            snprintf(why, why_size, "The path is too long.");
+            return -1;
+        }
+        snprintf(file, sizeof(file), "%s", path);
+    } else if (ReplayFile_NewName(file, sizeof(file))) {
+        snprintf(why, why_size, "No name could be made for the replay in %s.", Paths_UserDir());
+        return -1;
+    }
+    if (ReplayFile_SetNextRecord(file)) {
+        snprintf(why, why_size, "The replay could not be named for the restart in %s.", Paths_UserDir());
+        return -1;
+    }
+    return 0;
+#endif
+}
+
+int Recorder_BootRestart(char *why, size_t why_size)
+{
+#ifdef __ANDROID__
+    snprintf(why, why_size, "Replays are not on Android yet.");
+    return -1;
+#else
+    char left[sizeof(zip_path)];
+    /* Does not return when the game restarts: the next start takes the name
+     * (Recorder_Init) and records from its first frame. */
+    if (Platform_RestartGame() >= 0) return 0;
+    ReplayFile_TakeNextRecord(left, sizeof(left));
+    snprintf(why, why_size, "The game could not restart itself.");
+    return -1;
 #endif
 }
 

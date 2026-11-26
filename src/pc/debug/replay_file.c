@@ -188,6 +188,7 @@ static char *header_json(const char *recording, size_t *size)
     static const char *const keys[] = {"build: ", "os: ", "settings: ", "mods: ", "clock: "};
     static char values[5][4096], line[8192]; /* not on the game's stack, which a VSync's caller may be on */
     char build[64] = "", language[16] = "0";
+    int boot = 0; /* "start boot": no start state in the file */
     char *json = malloc(65536), *at = json, *end;
     FILE *file = fopen(recording, "r");
     const char *found;
@@ -201,6 +202,7 @@ static char *header_json(const char *recording, size_t *size)
     while (file && fgets(line, sizeof(line), file)) {
         line[strcspn(line, "\r\n")] = '\0';
         if (!strncmp(line, "build ", 6)) snprintf(build, sizeof(build), "%s", line + 6);
+        if (!strcmp(line, "start boot")) boot = 1;
         if (strncmp(line, "F ", 2)) continue;
         for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
             if (!strncmp(line + 2, keys[i], strlen(keys[i]))) snprintf(values[i], sizeof(values[i]), "%s", line + 2 + strlen(keys[i]));
@@ -223,9 +225,10 @@ static char *header_json(const char *recording, size_t *size)
     json_words(&at, end, strcmp(values[3], "none") ? values[3] : "", 0);
     json_raw(&at, end, ",\n  \"language\": ");
     json_string(&at, end, language, strlen(language));
-    json_raw(&at, end, "\n },\n \"start\": {\"kind\": \"state\", \"file\": \"start.state\"},\n"
-                       " \"recording\": \"recording.txt\",\n \"progress\": \"progress\",\n \"states_every\": 0,\n"
-                       " \"notes\": \"Game > Record replay\"\n}\n");
+    json_raw(&at, end, boot ? "\n },\n \"start\": {\"kind\": \"boot\"},\n"
+                            : "\n },\n \"start\": {\"kind\": \"state\", \"file\": \"start.state\"},\n");
+    json_raw(&at, end, " \"recording\": \"recording.txt\",\n \"progress\": \"progress\",\n \"states_every\": 0,\n");
+    json_raw(&at, end, boot ? " \"notes\": \"Game > Record replay from boot\"\n}\n" : " \"notes\": \"Game > Record replay\"\n}\n");
     *at = '\0';
     *size = (size_t)(at - json);
     return json;
@@ -270,8 +273,9 @@ int ReplayFile_Finish(const char *file, char *why, size_t why_size)
     ok = Mods_ZipAddData(zip, "replay.json", json, json_size, why, why_size) &&
          Mods_ZipAddFile(zip, "recording.txt", path, why, why_size);
     free(json);
+    /* A recording from boot never made one: the file holds none. */
     snprintf(path, sizeof(path), "%s/start.state", work);
-    if (ok) ok = Mods_ZipAddFile(zip, "start.state", path, why, why_size);
+    if (ok && is_file(path)) ok = Mods_ZipAddFile(zip, "start.state", path, why, why_size);
     for (i = 0; ok && (name = Paths_ProgressName(i)) != NULL; i++) {
         snprintf(path, sizeof(path), "%s/progress/%s", work, name);
         snprintf(prefix, sizeof(prefix), "progress/%s", name);
@@ -368,21 +372,23 @@ int ReplayFile_NewName(char *path, size_t size)
     return -1;
 }
 
-int ReplayFile_SetNext(const char *file)
+/* The name a restart leaves for the next start, in replays/`marker`. */
+static int set_marker(const char *marker, const char *file)
 {
-    char path[1100];
+    char relative[64], path[1100];
     FILE *out;
-    if (Paths_User(path, sizeof(path), "replays/next.txt") || !(out = fopen(path, "w"))) return -1;
+    snprintf(relative, sizeof(relative), "replays/%s", marker);
+    if (Paths_User(path, sizeof(path), relative) || !(out = fopen(path, "w"))) return -1;
     fprintf(out, "%s\n", file);
     return fclose(out) ? -1 : 0;
 }
 
-int ReplayFile_TakeNext(char *file, size_t size)
+static int take_marker(const char *marker, char *file, size_t size)
 {
     char path[1100];
     FILE *in;
     /* Asked at every start: no folder is made for it (Paths_User would). */
-    if (snprintf(path, sizeof(path), "%s/replays/next.txt", Paths_UserDir()) >= (int)sizeof(path) ||
+    if (snprintf(path, sizeof(path), "%s/replays/%s", Paths_UserDir(), marker) >= (int)sizeof(path) ||
         !(in = fopen(path, "r")))
         return -1;
     if (!fgets(file, (int)size, in)) file[0] = '\0';
@@ -391,3 +397,8 @@ int ReplayFile_TakeNext(char *file, size_t size)
     file[strcspn(file, "\r\n")] = '\0';
     return file[0] ? 0 : -1;
 }
+
+int ReplayFile_SetNext(const char *file) { return set_marker("next.txt", file); }
+int ReplayFile_TakeNext(char *file, size_t size) { return take_marker("next.txt", file, size); }
+int ReplayFile_SetNextRecord(const char *file) { return set_marker("next-record.txt", file); }
+int ReplayFile_TakeNextRecord(char *file, size_t size) { return take_marker("next-record.txt", file, size); }

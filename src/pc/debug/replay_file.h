@@ -6,8 +6,11 @@
  *     replay.json      format 1, kind "recorded", the header (build, OS,
  *                      settings, mods, clock) and where it starts
  *     recording.txt    the recorder's lines (recorder.h), starting from
- *                      "start state start.state", with no C line
- *     start.state      the save state the recording starts from
+ *                      "start state start.state" (or "start boot"), with no
+ *                      C line
+ *     start.state      the save state the recording starts from; none in a
+ *                      recording from boot (replay.json: "start": boot), so
+ *                      that nothing of the game's RAM is in the file
  *     progress/...     the player's progress as it was when the recording
  *                      began: the save slots and what they keep beside them,
  *                      and the memory card images (paths.h, Paths_IsProgress)
@@ -23,8 +26,9 @@
 #include <stddef.h>
 
 /* The working folder for a recording that becomes `file`: the paths of its
- * recording.txt and start.state, and the player's progress copied in.
- * 0, or -1 with why. */
+ * recording.txt and start.state (where a recording from here writes its
+ * start state; one from boot never does), and the player's progress copied
+ * in. 0, or -1 with why. */
 int ReplayFile_Begin(const char *file, char *recording, size_t recording_size, char *state, size_t state_size,
                      char *why, size_t why_size);
 /* Packs the working folder into `file` and removes it: 0, or -1 with why
@@ -45,4 +49,8 @@ int ReplayFile_NewName(char *path, size_t size);
  * named in replays/next.txt, which the next start takes and removes. */
 int ReplayFile_SetNext(const char *file);
 int ReplayFile_TakeNext(char *file, size_t size);
+/* Game > Record replay from boot...: the same, for the file the next start
+ * records to from its first frame (replays/next-record.txt). */
+int ReplayFile_SetNextRecord(const char *file);
+int ReplayFile_TakeNextRecord(char *file, size_t size);
 #endif

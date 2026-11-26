@@ -35,6 +35,12 @@
  *     record PATH       record a replay from here (recorder.h): its start state
  *                       is taken and loaded, and the "ok" comes at the next point
  *     record stop       end the recording
+ *     record_boot PATH  restart the game and record a replay from its first
+ *                       frame (recorder.h): PATH a .yfmreplay with no start
+ *                       state; the "ok" comes before the restart, and no
+ *                       client follows the new game (its MEMORIES_CONTROL is
+ *                       dropped), which runs on as the environment it was
+ *                       started with says
  *     quit              end the game
  *
  * Numbers that are hex may carry a 0x; decimal ones may be given as 0x...
@@ -60,7 +66,8 @@ typedef enum {
     CONTROL_POINTER,
     CONTROL_WHEEL,
     CONTROL_KEY,
-    CONTROL_RECORD
+    CONTROL_RECORD,
+    CONTROL_RECORD_BOOT
 } ControlKind;
 
 typedef struct {
@@ -70,7 +77,7 @@ typedef struct {
     uint16_t bits;    /* pad */
     uint32_t address; /* peek, poke: as given (normalised by ControlProtocol_GuestRange) */
     uint32_t length;  /* peek: bytes asked for; poke: bytes decoded into the caller's buffer */
-    const char *path; /* shot, save, load, record: inside the parsed line (record stop: NULL); jump: the target */
+    const char *path; /* shot, save, load, record, record_boot: inside the parsed line (record stop: NULL); jump: the target */
     int opponent;     /* jump */
     const char *deck; /* jump: NULL when not given */
     /* After v0.3.0's fields (tools/pc/mod_compat.txt): */
