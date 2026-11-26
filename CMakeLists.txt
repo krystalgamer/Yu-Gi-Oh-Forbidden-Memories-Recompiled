@@ -1439,6 +1439,14 @@ if(Python3_Interpreter_FOUND)
         add_test(NAME pc_replay_check
             COMMAND "${Python3_EXECUTABLE}" tests/pc/replay_check_test.py
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        # The player's replays against the game (notes/replays.md): from boot,
+        # started and stopped at run time, played with a scratch copy of the
+        # saves, and a C line refused. Needs the game and MEMORIES_DISC;
+        # skipped without them, as on CI.
+        add_test(NAME pc_player_replay
+            COMMAND "${Python3_EXECUTABLE}" tests/pc/player_replay_test.py
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(pc_player_replay PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
         # yfm_control.py's replies against a made-up game: slow, closed, hung
         # (notes/agent-control.md).
         add_test(NAME pc_control_client
