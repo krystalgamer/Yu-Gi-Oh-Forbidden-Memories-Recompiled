@@ -9,6 +9,7 @@
 #include "pc/platform/paths.h"
 #include "pc/platform/platform.h"
 #include "pc/sdk/display.h"
+#include "pc/tower/tower.h"
 #include "pc/compat/signal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -518,6 +519,10 @@ int Recorder_Start(const char *path, char *why, size_t why_size)
         snprintf(why, why_size, "The path is too long.");
         return -1;
     }
+    /* The start state is a save: a tower whose mod turns save states off
+     * refuses it (state.c's save does too, but says only "not saved"). Asked
+     * first, so nothing is set up and the player is told why. */
+    if (Tower_Guard(TOWER_GUARD_SAVE_STATE, 0, why, why_size)) return -1;
     if (packed) {
         if (ReplayFile_Begin(path, recording_path, sizeof(recording_path), state, sizeof(state), why, why_size)) {
             ReplayFile_Abandon(path); /* a copy that failed halfway left its folder */
