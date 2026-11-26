@@ -98,7 +98,8 @@ void Recorder_RequestStart(void);
  * file (PATH, a .yfmreplay, or NULL for a new one in the user folder's
  * replays/) and leaves it for the next start: 0, or -1 with why. Restart
  * then restarts the game (Platform_RestartGame); it returns only when that
- * failed, -1 with why, the request taken back. Main thread. */
+ * failed, -1 with why, the request taken back (ReplayFile_DropNextRecord).
+ * Main thread. */
 int Recorder_BootRequest(const char *path, char *why, size_t why_size);
 int Recorder_BootRestart(char *why, size_t why_size);
 /* A player's replay is playing (or has ended, the game paused). */

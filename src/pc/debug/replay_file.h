@@ -46,11 +46,17 @@ int ReplayFile_Is(const char *path);
 /* A new file's name in the user directory's replays/, by the time. */
 int ReplayFile_NewName(char *path, size_t size);
 /* File > Play replay... restarts the game into the replay: the file is
- * named in replays/next.txt, which the next start takes and removes. */
+ * named in replays/next.txt with the time it was made, which the next start
+ * takes and removes. A marker is an order only when it is fresh (under a
+ * minute old) and could be removed: the leftover of a restart that never
+ * came is dropped, with a line on stderr, and not taken. */
 int ReplayFile_SetNext(const char *file);
 int ReplayFile_TakeNext(char *file, size_t size);
 /* Game > Record replay from boot...: the same, for the file the next start
  * records to from its first frame (replays/next-record.txt). */
 int ReplayFile_SetNextRecord(const char *file);
 int ReplayFile_TakeNextRecord(char *file, size_t size);
+/* A restart that failed takes its marker back (its Set did not come true). */
+void ReplayFile_DropNext(void);
+void ReplayFile_DropNextRecord(void);
 #endif

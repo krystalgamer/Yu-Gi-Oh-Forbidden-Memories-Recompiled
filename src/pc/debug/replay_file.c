@@ -183,7 +183,7 @@ static void json_words(char **at, char *end, const char *words, int pairs)
 }
 
 /* replay.json from the recording's own header lines (replay.py's format 1). */
-static char *header_json(const char *recording, size_t *size)
+static char *header_json(const char *recording, size_t *size, int *from_boot)
 {
     static const char *const keys[] = {"build: ", "os: ", "settings: ", "mods: ", "clock: "};
     static char values[5][4096], line[8192]; /* not on the game's stack, which a VSync's caller may be on */
@@ -231,6 +231,7 @@ static char *header_json(const char *recording, size_t *size)
     json_raw(&at, end, boot ? " \"notes\": \"Game > Record replay from boot\"\n}\n" : " \"notes\": \"Game > Record replay\"\n}\n");
     *at = '\0';
     *size = (size_t)(at - json);
+    *from_boot = boot;
     return json;
 }
 
@@ -251,19 +252,28 @@ static int add_one(const char *path, const char *name, void *context)
 
 int ReplayFile_Finish(const char *file, char *why, size_t why_size)
 {
-    char work[1100], path[1200], prefix[300];
+    char work[1100], path[1200], prefix[300], state[1200];
     const char *name;
     char *json;
     size_t json_size = 0;
     ModsZipOut *zip;
-    int i, ok;
+    int i, ok, boot = 0;
     if (work_folder(file, work, sizeof(work))) {
         snprintf(why, why_size, "The replay's path is too long.");
         return -1;
     }
     snprintf(path, sizeof(path), "%s/recording.txt", work);
-    if (!(json = header_json(path, &json_size))) {
+    if (!(json = header_json(path, &json_size, &boot))) {
         snprintf(why, why_size, "Out of memory.");
+        return -1;
+    }
+    /* What the recording says it starts from decides, not what the folder
+     * holds: a recording from a state that lost its state is refused (the
+     * folder is kept), not packed as a recording from boot. */
+    snprintf(state, sizeof(state), "%s/start.state", work);
+    if (!boot && !is_file(state)) {
+        free(json);
+        snprintf(why, why_size, "The recording starts from a state, and its start state is missing.");
         return -1;
     }
     if (!(zip = Mods_ZipCreate(file, why, why_size))) {
@@ -273,9 +283,8 @@ int ReplayFile_Finish(const char *file, char *why, size_t why_size)
     ok = Mods_ZipAddData(zip, "replay.json", json, json_size, why, why_size) &&
          Mods_ZipAddFile(zip, "recording.txt", path, why, why_size);
     free(json);
-    /* A recording from boot never made one: the file holds none. */
-    snprintf(path, sizeof(path), "%s/start.state", work);
-    if (ok && is_file(path)) ok = Mods_ZipAddFile(zip, "start.state", path, why, why_size);
+    /* A recording from boot never made a state: the file holds none. */
+    if (ok && !boot) ok = Mods_ZipAddFile(zip, "start.state", state, why, why_size);
     for (i = 0; ok && (name = Paths_ProgressName(i)) != NULL; i++) {
         snprintf(path, sizeof(path), "%s/progress/%s", work, name);
         snprintf(prefix, sizeof(prefix), "progress/%s", name);
@@ -372,33 +381,70 @@ int ReplayFile_NewName(char *path, size_t size)
     return -1;
 }
 
-/* The name a restart leaves for the next start, in replays/`marker`. */
+/* The name a restart leaves for the next start, in replays/`marker`: its
+ * first line is the time it was made (seconds since the epoch), the second
+ * the file. */
 static int set_marker(const char *marker, const char *file)
 {
     char relative[64], path[1100];
     FILE *out;
     snprintf(relative, sizeof(relative), "replays/%s", marker);
     if (Paths_User(path, sizeof(path), relative) || !(out = fopen(path, "w"))) return -1;
-    fprintf(out, "%s\n", file);
+    fprintf(out, "%lld\n%s\n", (long long)time(NULL), file);
     return fclose(out) ? -1 : 0;
 }
 
+/* A restart starts the game within seconds. A marker older than this is the
+ * leftover of a restart that never came (the monitor's start_game failed, or
+ * the new process died before Recorder_Init): not an order any more. */
+#define MARKER_FRESH_SECONDS 60
+
+/* Takes the marker: the file it names, only when the marker is an order, that
+ * is fresh and removed. A stale one, one of the older format (no time line)
+ * and one that cannot be removed (an antivirus holds it, a read-only folder:
+ * it would be honoured at every start) are dropped, said on stderr, and never
+ * honoured. 0 with `file`, or -1. */
 static int take_marker(const char *marker, char *file, size_t size)
 {
-    char path[1100];
+    char path[1100], stamp[40];
     FILE *in;
+    char *end;
+    long long made, now;
     /* Asked at every start: no folder is made for it (Paths_User would). */
     if (snprintf(path, sizeof(path), "%s/replays/%s", Paths_UserDir(), marker) >= (int)sizeof(path) ||
         !(in = fopen(path, "r")))
         return -1;
+    if (!fgets(stamp, (int)sizeof(stamp), in)) stamp[0] = '\0';
     if (!fgets(file, (int)size, in)) file[0] = '\0';
     fclose(in);
-    remove(path); /* taken once: a replay that crashes the game does not come back at every start */
     file[strcspn(file, "\r\n")] = '\0';
+    /* Taken once: a replay that crashes the game does not come back at every start. */
+    if (remove(path)) {
+        fprintf(stderr, "memories-pc: replay: %s cannot be removed, so it is not honoured\n", path);
+        return -1;
+    }
+    made = strtoll(stamp, &end, 10);
+    now = (long long)time(NULL);
+    if (end == stamp || *end != '\n' || made > now || now - made > MARKER_FRESH_SECONDS) {
+        fprintf(stderr, "memories-pc: replay: %s is a leftover (made %lld, now %lld), dropped\n", path,
+                end == stamp ? 0LL : made, now);
+        return -1;
+    }
     return file[0] ? 0 : -1;
+}
+
+/* A request taken back: the restart it was for did not happen. */
+static void drop_marker(const char *marker)
+{
+    char path[1100];
+    if (snprintf(path, sizeof(path), "%s/replays/%s", Paths_UserDir(), marker) < (int)sizeof(path) && remove(path) &&
+        access(path, F_OK) == 0)
+        fprintf(stderr, "memories-pc: replay: %s cannot be removed\n", path);
 }
 
 int ReplayFile_SetNext(const char *file) { return set_marker("next.txt", file); }
 int ReplayFile_TakeNext(char *file, size_t size) { return take_marker("next.txt", file, size); }
 int ReplayFile_SetNextRecord(const char *file) { return set_marker("next-record.txt", file); }
 int ReplayFile_TakeNextRecord(char *file, size_t size) { return take_marker("next-record.txt", file, size); }
+void ReplayFile_DropNext(void) { drop_marker("next.txt"); }
+void ReplayFile_DropNextRecord(void) { drop_marker("next-record.txt"); }

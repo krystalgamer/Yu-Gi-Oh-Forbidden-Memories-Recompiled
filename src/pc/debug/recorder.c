@@ -311,8 +311,9 @@ void Recorder_Init(void)
     if (boot_asked) {
         if ((record && *record) || playing || (state && *state)) {
             notify("Recording not started",
-                   "The game was started to record or play something else (MEMORIES_RECORD, MEMORIES_PLAY or "
-                   "MEMORIES_LOAD_STATE).", NULL, NULL);
+                   "The marker replays/next-record.txt asked for a recording from boot, but this start was already "
+                   "to record or play something else (MEMORIES_RECORD, MEMORIES_PLAY, MEMORIES_LOAD_STATE or "
+                   "the marker replays/next.txt).", NULL, NULL);
         } else {
             record_from_boot(boot);
         }
@@ -489,8 +490,14 @@ void Recorder_Point(unsigned frame)
      * presents twice in the last one). A player's replay in a window pauses
      * there, and offers the way back; any other play ends the game, as does
      * one with a control client (MEMORIES_CONTROL), which the pause would
-     * leave unanswered. File > Play replay... is never that: a restart drops
-     * MEMORIES_CONTROL (main.c), so a player's playback keeps its pause. */
+     * leave unanswered. A restart drops MEMORIES_CONTROL (Platform_RestartGame),
+     * so File > Play replay... keeps its pause, unless a scripted check
+     * puts the variable back through MEMORIES_RESTART_ENV: then it expects
+     * a client and the play ends the game. The rule keys on the variable and
+     * not on an attached client: the variable is there from the game's
+     * start, and the game waits for the client at start
+     * (MEMORIES_CONTROL_WAIT), so a client that is late, or has left, does
+     * not turn the end into a pause that a script then waits on forever. */
     if (playing && play_has_end && (index > play_end || (index == play_end && frame >= play_end_frame))) {
         const char *control = getenv("MEMORIES_CONTROL");
         fprintf(stderr, "memories-pc: replay: the recording ends at VBlank %u; done\n", play_end);
@@ -657,11 +664,10 @@ int Recorder_BootRestart(char *why, size_t why_size)
     snprintf(why, why_size, "Replays are not on Android yet.");
     return -1;
 #else
-    char left[sizeof(zip_path)];
     /* Does not return when the game restarts: the next start takes the name
      * (Recorder_Init) and records from its first frame. */
     if (Platform_RestartGame() >= 0) return 0;
-    ReplayFile_TakeNextRecord(left, sizeof(left));
+    ReplayFile_DropNextRecord(); /* the request is taken back: no later start may record from it */
     snprintf(why, why_size, "The game could not restart itself.");
     return -1;
 #endif

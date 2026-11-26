@@ -40,7 +40,10 @@
  *                       state; the "ok" comes before the restart, and no
  *                       client follows the new game (its MEMORIES_CONTROL is
  *                       dropped), which runs on as the environment it was
- *                       started with says
+ *                       started with says. A restart that fails leaves the
+ *                       client's connection closed after the "ok" (a
+ *                       restart that works closes it too): a game that
+ *                       answers a new connection did not restart
  *     quit              end the game
  *
  * Numbers that are hex may carry a 0x; decimal ones may be given as 0x...

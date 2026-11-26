@@ -2193,7 +2193,8 @@ static void play_replay(const char *file)
         snprintf(why, sizeof(why), "The replay could not be named for the restart in %s.", Paths_UserDir());
         replay_not_played(why);
     } else if (Platform_RestartGame() < 0) {
-        replay_not_played("The game could not restart itself. Start it again to play the replay.");
+        ReplayFile_DropNext(); /* the request is taken back: no later start may play from it */
+        replay_not_played("The game could not restart itself, so the replay was not played.");
     }
 }
 

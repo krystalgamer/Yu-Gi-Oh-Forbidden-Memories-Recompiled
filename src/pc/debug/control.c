@@ -473,8 +473,20 @@ static int handle(char *text)
             send_error(error);
             return 0;
         }
+        /* A successful restart never returns (execv, TerminateProcess), so no
+         * reply can wait for its result: "err" before "ok" is out of reach,
+         * and an "err" after the "ok" would be taken for the reply to the
+         * client's next command. A restart that fails (Recorder_BootRestart
+         * has taken the request back) detaches the client instead: it sees
+         * EOF, as it does when the restart works, and finds out which by
+         * connecting again, which only the game that is still here answers
+         * (a restart drops MEMORIES_CONTROL). */
         send_line("ok");
-        if (Recorder_BootRestart(error, sizeof(error))) fprintf(stderr, "memories-pc: control: record_boot: %s\n", error);
+        if (Recorder_BootRestart(error, sizeof(error))) {
+            fprintf(stderr, "memories-pc: control: record_boot: %s\n", error);
+            detach("record_boot could not restart the game");
+            return 1; /* as quit: the client is gone, so the game runs on */
+        }
         return 0;
     case CONTROL_QUIT:
         send_line("ok");
