@@ -19,7 +19,14 @@
  *     any more, so the reset the next start makes cannot meet a pop. A
  *     consumer thread calls the gate as a device does, and the game side
  *     switches on, fills the ring and switches off, over and over; after
- *     each off the ring must stand still, and a reset leaves it empty. */
+ *     each off the ring must stand still, and a reset leaves it empty.
+ *  4. The fades at an underrun's edges (AudioFifo_Fade), through the gate as
+ *     a device calls it, in pops shorter than a fade: the first frames after
+ *     a silence fade in over AUDIO_FIFO_FADE frames; where the queue runs dry
+ *     (a pop that empties it exactly, then pops that find nothing) the last
+ *     frame fades out over as many, then silence; a queue that plays again in
+ *     the middle of a fade-out fades in from where it stood.
+ */
 #include "pc/audio/fifo.h"
 #include "pc/audio/replace.h"
 #include "pc/audio/spu.h"
@@ -297,6 +304,91 @@ static int churn_check(void)
     return bad != 0;
 }
 
+/* --- the fades at an underrun's edges --------------------------------------------- */
+
+static int fade_failed;
+
+static void fade_expect(const int16_t *out, unsigned at, int left, int right, const char *what)
+{
+    if (out[at * 2] != left || out[at * 2 + 1] != right) {
+        fprintf(stderr, "audio_fifo_test: %s: frame %u is %d/%d, not %d/%d\n", what, at, out[at * 2],
+                out[at * 2 + 1], left, right);
+        fade_failed = 1;
+    }
+}
+
+/* `count` frames through the gate, as a device asks, in pops of `chunk`. */
+static void fade_pop(int16_t *out, size_t count, size_t chunk)
+{
+    size_t done;
+    for (done = 0; done < count; done += chunk)
+        AudioFifoGate_Call(&gate, &fifo, out + done * 2, count - done < chunk ? count - done : chunk, own_mix);
+}
+
+static int fade_check(void)
+{
+    static int16_t frames[AUDIO_FIFO_PRIME * 2], out[4096 * 2];
+    const int left = 12000, right = -9000, fade = (int)AUDIO_FIFO_FADE;
+    unsigned i, mixes = own_mixes;
+    for (i = 0; i < AUDIO_FIFO_PRIME; i++) {
+        frames[i * 2] = (int16_t)left;
+        frames[i * 2 + 1] = (int16_t)right;
+    }
+    /* The last frame differs, so the fade out is seen to start from it. */
+    frames[(AUDIO_FIFO_PRIME - 1) * 2] = 6400;
+    frames[(AUDIO_FIFO_PRIME - 1) * 2 + 1] = -3200;
+    AudioFifo_Reset(&fifo);
+    AudioFifoGate_Switch(&gate, 1);
+    /* From silence: a fade in, in pops of 10. */
+    AudioFifo_Push(&fifo, frames, AUDIO_FIFO_PRIME);
+    fade_pop(out, 100, 10);
+    for (i = 0; i < 100; i++) {
+        int level = i < AUDIO_FIFO_FADE ? (int)i + 1 : fade;
+        fade_expect(out, i, left * level / fade, right * level / fade, "fade in");
+    }
+    /* The rest of the queue exactly, then pops of 7 that find nothing: the
+     * last frame fades out, then silence. */
+    fade_pop(out, AUDIO_FIFO_PRIME - 100, 256);
+    fade_expect(out, AUDIO_FIFO_PRIME - 101, 6400, -3200, "the last frame");
+    fade_pop(out, 200, 7);
+    for (i = 0; i < 200; i++) {
+        int level = i < AUDIO_FIFO_FADE ? fade - 1 - (int)i : 0;
+        fade_expect(out, i, 6400 * level / fade, -3200 * level / fade, "fade out");
+    }
+    if (AudioFifo_Underruns(&fifo) != 1) {
+        fprintf(stderr, "audio_fifo_test: fade: %u underruns, not 1\n", AudioFifo_Underruns(&fifo));
+        fade_failed = 1;
+    }
+    /* Dry again with 10 frames left, then 20 frames of fade out... */
+    AudioFifo_Push(&fifo, frames, AUDIO_FIFO_PRIME);
+    fade_pop(out, AUDIO_FIFO_PRIME - 10, 256);
+    fade_pop(out, 30, 5);
+    for (i = 0; i < 30; i++) {
+        int level = i < 10 ? fade : fade - (int)(i - 9);
+        int l = i < 9 ? left : 6400, r = i < 9 ? right : -3200;
+        fade_expect(out, i, l * level / fade, r * level / fade, "fade out cut short");
+    }
+    /* ...and the queue plays again: it fades in from 44/64, in pops of 3. */
+    AudioFifo_Push(&fifo, frames, AUDIO_FIFO_PRIME);
+    fade_pop(out, 40, 3);
+    for (i = 0; i < 40; i++) {
+        int level = fade - 20 + (int)i + 1;
+        if (level > fade) level = fade;
+        fade_expect(out, i, left * level / fade, right * level / fade, "fade in from a fade out");
+    }
+    AudioFifoGate_Switch(&gate, 0);
+    AudioFifo_Reset(&fifo);
+    if (own_mixes != mixes) {
+        fprintf(stderr, "audio_fifo_test: fade: the gate ran its own mixer\n");
+        fade_failed = 1;
+    }
+    if (!fade_failed) {
+        printf("audio_fifo_test: fades in and out over %u frames, across pops, and from a fade cut short\n",
+               AUDIO_FIFO_FADE);
+    }
+    return fade_failed;
+}
+
 int main(void)
 {
     uint64_t alone, steady, greedy;
@@ -311,5 +403,6 @@ int main(void)
         return 1;
     }
     if (order_check()) return 1;
-    return churn_check();
+    if (churn_check()) return 1;
+    return fade_check();
 }

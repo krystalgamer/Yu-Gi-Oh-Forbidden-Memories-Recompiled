@@ -14,7 +14,9 @@
  * AUDIO_FIFO_PRIME frames before it plays again (so a paused or slow game
  * gives a clean gap, not a crackle of single blocks), and skips the oldest
  * frames past AUDIO_FIFO_MOST (a game at Turbo makes more than real time
- * plays, and the latency would grow without end).
+ * plays, and the latency would grow without end). Where it runs dry it fades
+ * the last frame out, and where it plays again it fades in, each over
+ * AUDIO_FIFO_FADE frames (AudioFifo_Fade): no hard cut to zero and back.
  *
  * Header only, so the game's backends and CTest (tests/pc/audio_fifo_test.c)
  * build the same code. Stereo frames of two int16_t. */
@@ -26,11 +28,14 @@
 #define AUDIO_FIFO_FRAMES 16384u /* 372 ms; a power of two */
 #define AUDIO_FIFO_PRIME 2048u   /* 46 ms queued before sound starts again */
 #define AUDIO_FIFO_MOST 6144u    /* 139 ms queued at most: the rest is skipped */
+#define AUDIO_FIFO_FADE 64u      /* 1.5 ms of fade out where the queue runs dry, and in where it plays again */
 
 typedef struct {
     int16_t frames[AUDIO_FIFO_FRAMES * 2];
     uint32_t head, tail;     /* written (producer) and read (consumer) counts, mod 2^32 */
     int primed;              /* consumer only */
+    int16_t last[2];         /* consumer only: the last frame taken from the queue, unfaded */
+    uint32_t level;          /* consumer only: the fade's gain, 0 to AUDIO_FIFO_FADE */
     uint32_t dropped;        /* producer only: frames that found the ring full */
     uint32_t underruns;      /* written by the consumer only; read through AudioFifo_Underruns */
     uint32_t skipped;        /* written by the consumer only; read through AudioFifo_Skipped */
@@ -72,8 +77,9 @@ static inline void AudioFifo_Push(AudioFifo *fifo, const int16_t *frames, size_t
     __atomic_store_n(&fifo->head, head + (uint32_t)count, __ATOMIC_RELEASE);
 }
 
-/* Consumer: `count` frames into `out`, silence where there are none. */
-static inline void AudioFifo_Pop(AudioFifo *fifo, int16_t *out, size_t count)
+/* Consumer: `count` frames into `out`, silence where there are none. Returns
+ * how many came from the queue (the rest is the silence). */
+static inline size_t AudioFifo_Pop(AudioFifo *fifo, int16_t *out, size_t count)
 {
     uint32_t head = __atomic_load_n(&fifo->head, __ATOMIC_ACQUIRE), tail = fifo->tail;
     uint32_t queued = head - tail;
@@ -97,6 +103,34 @@ static inline void AudioFifo_Pop(AudioFifo *fifo, int16_t *out, size_t count)
         fifo->primed = 0;
     }
     __atomic_store_n(&fifo->tail, tail + (uint32_t)take, __ATOMIC_RELEASE);
+    return take;
+}
+
+/* Consumer, after AudioFifo_Pop gave `take` of `count` frames: the edges of
+ * an underrun faded, so the sound never jumps to zero or back. The silence
+ * after the last frame taken becomes that frame fading out over
+ * AUDIO_FIFO_FADE frames, and the first frames after a silence fade in over
+ * as many; a fade carries on into the next call, and one cut short turns
+ * round where it stands. What is heard only: the game never sees it. */
+static inline void AudioFifo_Fade(AudioFifo *fifo, int16_t *out, size_t take, size_t count)
+{
+    uint32_t level = fifo->level;
+    size_t i;
+    if (take) {
+        fifo->last[0] = out[(take - 1) * 2];
+        fifo->last[1] = out[(take - 1) * 2 + 1];
+    }
+    for (i = 0; i < take && level < AUDIO_FIFO_FADE; i++) {
+        level++;
+        out[i * 2] = (int16_t)(out[i * 2] * (int32_t)level / (int32_t)AUDIO_FIFO_FADE);
+        out[i * 2 + 1] = (int16_t)(out[i * 2 + 1] * (int32_t)level / (int32_t)AUDIO_FIFO_FADE);
+    }
+    for (i = take; i < count && level; i++) {
+        level--;
+        out[i * 2] = (int16_t)(fifo->last[0] * (int32_t)level / (int32_t)AUDIO_FIFO_FADE);
+        out[i * 2 + 1] = (int16_t)(fifo->last[1] * (int32_t)level / (int32_t)AUDIO_FIFO_FADE);
+    }
+    fifo->level = level;
 }
 
 /* The device thread's switch between this FIFO and its own mixer. A thread
@@ -115,7 +149,7 @@ static inline void AudioFifoGate_Call(AudioFifoGate *gate, AudioFifo *fifo, int1
                                       void (*own_mix)(int16_t *, size_t))
 {
     __atomic_store_n(&gate->in_call, 1, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&gate->on, __ATOMIC_SEQ_CST)) AudioFifo_Pop(fifo, out, count);
+    if (__atomic_load_n(&gate->on, __ATOMIC_SEQ_CST)) AudioFifo_Fade(fifo, out, AudioFifo_Pop(fifo, out, count), count);
     else own_mix(out, count);
     __atomic_store_n(&gate->in_call, 0, __ATOMIC_SEQ_CST);
 }
