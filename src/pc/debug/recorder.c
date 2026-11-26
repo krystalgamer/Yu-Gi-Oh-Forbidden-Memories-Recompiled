@@ -487,11 +487,15 @@ void Recorder_Point(unsigned frame)
     }
     /* The end: its VBlank and its frame (a game closed between two VBlanks
      * presents twice in the last one). A player's replay in a window pauses
-     * there, and offers the way back; any other play ends the game. */
+     * there, and offers the way back; any other play ends the game, as does
+     * one with a control client (MEMORIES_CONTROL), which the pause would
+     * leave unanswered. File > Play replay... is never that: a restart drops
+     * MEMORIES_CONTROL (main.c), so a player's playback keeps its pause. */
     if (playing && play_has_end && (index > play_end || (index == play_end && frame >= play_end_frame))) {
+        const char *control = getenv("MEMORIES_CONTROL");
         fprintf(stderr, "memories-pc: replay: the recording ends at VBlank %u; done\n", play_end);
         playing = 0;
-        if (player_play && !getenv("MEMORIES_HEADLESS")) {
+        if (player_play && !getenv("MEMORIES_HEADLESS") && !(control && *control)) {
             Platform_SetClockRate(0);
             notify("Replay finished", "The replay is over. File > Stop replay goes back to the title.", NULL, NULL);
         } else {

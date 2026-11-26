@@ -297,7 +297,10 @@ replay can begin at a state.
   channel's `record_boot` (Game > Record replay from boot...) restarts the
   game and records from boot instead, with no start state in the file.
 - **Play:** `MEMORIES_PLAY=path` gives the pads the file's bits (the live
-  ones are ignored) and ends the game at its `E`. A mod's `host->pad`
+  ones are ignored) and ends the game at its `E`; a player's `.yfmreplay`
+  in a window pauses there instead (notes/replays.md), unless
+  `MEMORIES_CONTROL` is set, so a client is never left waiting on a pause
+  that does not serve the channel. A mod's `host->pad`
   reads the played bits too (`Mods_PadSource`): it used to read the
   keyboard directly, so the hand camera's L1 was lost in a play. It now
   also sees a control client's bits, which it did not.
