@@ -16,6 +16,7 @@
 #include "pc/debug/profile.h"
 #include "pc/compat/signal.h"
 #include "pc/audio/spu.h"
+#include "pc/audio/fifo.h"
 #include "pc/render/soft_gpu.h"
 #include "controls_runtime.h"
 #include "settings.h"
@@ -113,6 +114,18 @@ static FILE *stepped_dump;    /* MEMORIES_DUMP_AUDIO, written as it is mixed */
 static uint32_t mix_fraction; /* ten-thousandths of a frame owed, below one frame */
 static uint32_t mix_owed;     /* whole frames owed: held (a save state), or stepped from the timer */
 
+/* The stepped mixer to a device (Platform_SetSteppedAudio): while a replay
+ * records or plays, the game thread mixes as above and an audio device's
+ * thread (or the silent sink's) plays those frames from a FIFO (fifo.h)
+ * instead of mixing them itself, so what the sound driver reads of the
+ * voices moves with the game's time, not with when the device asks. */
+static void (*thread_mix)(int16_t *, size_t); /* what a device or sink thread mixes (Platform_AudioThreadStarted) */
+static int stepped_wanted;                    /* a replay asked for it */
+static int stepped_by_request;                /* stepped_mixer is thread_mix through the FIFO */
+static int fifo_on;                           /* atomic: the threads play the FIFO */
+static int thread_in_mix;                     /* atomic: a thread is inside Platform_ThreadMix */
+static AudioFifo audio_fifo;
+
 static void mix_owe(unsigned us)
 {
     uint32_t total = mix_fraction + 441u * us; /* 44100 frames a second */
@@ -129,6 +142,7 @@ static void mix_owed_frames(void)
         size_t count = mix_owed < 256 ? mix_owed : 256;
         stepped_mixer(buffer, count);
         mix_owed -= (uint32_t)count;
+        if (stepped_by_request) AudioFifo_Push(&audio_fifo, buffer, count);
         if (stepped_dump) {
             fwrite(buffer, sizeof(int16_t) * 2, count, stepped_dump);
             unflushed += (unsigned)count;
@@ -1007,15 +1021,13 @@ int Platform_ScriptedPad2(void)
  * drained by the mixer. Under MEMORIES_DETERMINISTIC=1 neither has a thread:
  * the game thread mixes as virtual time passes (mix_step, above), and the
  * dump is written from there, as long as the game's virtual time. */
-static void (*silent_mixer)(int16_t *, size_t);
-
 static void *run_silent(void *path)
 {
     static int16_t buffer[256 * 2];
     FILE *file = path ? fopen(path, "wb") : NULL;
     struct timespec nap = {0, 256 * 1000000000ll / 44100};
     for (;;) {
-        silent_mixer(buffer, 256);
+        Platform_ThreadMix(buffer, 256);
         if (file) {
             fwrite(buffer, sizeof(buffer), 1, file);
             fflush(file);
@@ -1037,11 +1049,62 @@ int Platform_StartSilentAudio(void (*mix)(int16_t *, size_t), const char *dump_p
         return 0;
     }
 #endif
-    silent_mixer = mix;
+    Platform_AudioThreadStarted(mix);
     /* The timer signal is the game's interrupt and must stay on the main thread. */
     sigfillset(&all);
     pthread_sigmask(SIG_BLOCK, &all, &previous);
     error = pthread_create(&thread, NULL, run_silent, (void *)dump_path);
     pthread_sigmask(SIG_SETMASK, &previous, NULL);
     return error ? -1 : 0;
+}
+
+void Platform_ThreadMix(int16_t *out, size_t frames)
+{
+    __atomic_store_n(&thread_in_mix, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&fifo_on, __ATOMIC_SEQ_CST)) AudioFifo_Pop(&audio_fifo, out, frames);
+    else thread_mix(out, frames);
+    __atomic_store_n(&thread_in_mix, 0, __ATOMIC_SEQ_CST);
+}
+
+static void stepped_audio(int on)
+{
+    struct timespec nap = {0, 200000};
+    if (on) {
+        /* No thread to take over (headless under MEMORIES_DETERMINISTIC,
+         * which already steps, or no sound started yet), or done. */
+        if (stepped_by_request || !thread_mix || stepped_mixer) return;
+        AudioFifo_Reset(&audio_fifo);
+        mix_fraction = mix_owed = 0;
+        __atomic_store_n(&fifo_on, 1, __ATOMIC_SEQ_CST);
+        while (__atomic_load_n(&thread_in_mix, __ATOMIC_SEQ_CST)) nanosleep(&nap, NULL);
+        stepped_mixer = thread_mix;
+        stepped_by_request = 1;
+        fprintf(stderr, "memories-pc: audio: the game thread mixes as the virtual clock steps; the device plays it "
+                        "from a FIFO\n");
+    } else if (stepped_by_request) {
+        stepped_mixer = NULL;
+        stepped_by_request = 0;
+        mix_fraction = mix_owed = 0;
+        __atomic_store_n(&fifo_on, 0, __ATOMIC_SEQ_CST);
+        fprintf(stderr, "memories-pc: audio: the device mixes again\n");
+    }
+}
+
+void Platform_AudioThreadStarted(void (*mix)(int16_t *, size_t))
+{
+    thread_mix = mix;
+    if (stepped_wanted) stepped_audio(1);
+}
+
+void Platform_SetSteppedAudio(int on)
+{
+    stepped_wanted = on != 0;
+    stepped_audio(stepped_wanted);
+}
+
+void Platform_AudioFifoStats(unsigned *dropped, unsigned *underruns, unsigned *skipped)
+{
+    if (dropped) *dropped = audio_fifo.dropped;
+    if (underruns) *underruns = audio_fifo.underruns;
+    if (skipped) *skipped = audio_fifo.skipped;
 }

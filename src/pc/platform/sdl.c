@@ -1395,7 +1395,6 @@ int Gamepad_Connected(int p){return ControlsRuntime_Connected(p);}
 
 /* --- audio ------------------------------------------------------------ */
 
-static void (*mixer)(int16_t *, size_t);
 static SDL_AudioStream *stream;
 static volatile unsigned audio_underruns;
 
@@ -1406,7 +1405,7 @@ static void SDLCALL feed(void *userdata, SDL_AudioStream *to, int additional, in
     (void)total;
     if (SDL_GetAudioStreamQueued(to) == 0) audio_underruns++;
     while (additional > 0) {
-        mixer(buffer, 256);
+        Platform_ThreadMix(buffer, 256); /* the mix, or the stepped mixer's frames (platform.h) */
         SDL_PutAudioStreamData(to, buffer, (int)sizeof(buffer));
         additional -= (int)sizeof(buffer);
     }
@@ -1426,7 +1425,6 @@ int HERE(Platform_StartAudio)(void (*mix)(int16_t *, size_t))
     if (dump || getenv("MEMORIES_NO_AUDIO") || getenv("MEMORIES_HEADLESS") || !window) {
         return Platform_StartSilentAudio(mix, dump);
     }
-    mixer = mix;
 #ifdef __ANDROID__
     /* 256 frames starved AAudio on a phone (Xiaomi 11T Pro, Android 14): its
      * track got 5 s of sound every 6.3 s, crackling and gaps; 1024 (23 ms)
@@ -1446,6 +1444,7 @@ int HERE(Platform_StartAudio)(void (*mix)(int16_t *, size_t))
     block_signals(&previous);
     stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, feed, NULL);
     if (stream) {
+        Platform_AudioThreadStarted(mix); /* opened paused: before its first feed */
         SDL_ResumeAudioStreamDevice(stream);
     }
     restore_signals(&previous);
