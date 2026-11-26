@@ -26,7 +26,8 @@ When a recording starts:
   instead of mixing them itself. The game's sound driver reads the voices'
   levels, so where the device's thread mixed, a device that asked a little
   earlier or later changed the game. At 100 % the queue's fill paces the
-  game (`pace()`, `AudioFifo_PacePeriod`): each VBlank's period is nudged
+  game (`pace()`, which calls `AudioFifo_PaceGrid`, the one function the
+  pacer test runs too): each VBlank's period is nudged
   by at most 1/128 toward about 70 ms queued (3072 frames, ±512), and a
   frame late after a stall does not catch up while the queue is above
   that, so the latency neither creeps up after stalls nor drifts with a
@@ -37,7 +38,14 @@ When a recording starts:
   Where the queue runs dry (a stall, a pause) the last frame fades out over
   64 frames (1.5 ms), and the sound fades in as long when it comes back,
   instead of cutting to zero and back (`AudioFifo_Fade`: the device's side
-  only). The HUD's audio line then shows the queue's own numbers: the
+  only). The other jumps are crossfaded over the same 64 frames from the
+  last frame the device heard (`AudioFifo_Join`): the FIFO's switch on (the
+  device's own mixer's last frame fades out as the queue's first come up),
+  its switch off (the device's own mixer fades in from the FIFO's last
+  frame, also after a silence) and a skip past 139 ms at Turbo (also from
+  digital zero at full level). All of it is the consumer's
+  alone (the gate's ordering is unchanged), so the game sees the same. The
+  HUD's audio line then shows the queue's own numbers: the
   fill in ms, its underruns and the frames skipped.
 - A **start state** is taken and loaded at once (a short hitch), so the
   recording begins exactly as its playback will, with only what a state
@@ -61,7 +69,20 @@ chosen.
 The restart is the one that item uses (`Platform_RestartGame`); the name of
 the new file is left in `replays/next-record.txt`, as Play replay leaves its
 file's in `next.txt`, and the next start takes it (`Recorder_Init`) and
-records from the first VSync, on the virtual clock from frame 0. The game that
+records from the first VSync, on the virtual clock from frame 0. A marker is
+two lines, the time it was made and the file, and is an order only while
+fresh (under 60 s) and once removed: the leftover of a restart that never
+came (the monitor could not start the game, the new process died first), a
+marker of the older format and one that cannot be removed (a read-only
+folder, an antivirus) are dropped with a line on stderr and never honoured,
+so a later ordinary start does not record or play by itself (`take_marker`,
+replay_file.c, for both markers). When the restart itself fails, the
+request is taken back (`ReplayFile_DropNextRecord`, `ReplayFile_DropNext`)
+and the player is told: the menu with a notice, the control channel by
+detaching (its `ok` went out before: a restart that works never returns,
+and an `err` after the `ok` would be read as the reply to the next command;
+the client sees EOF either way, and a game that is still there answers a
+new connection). The game that
 comes up is an ordinary boot (the logos, then the title), with the player's
 saves as they were when the game restarted. Stop and a restart
 end it as for a recording from here. The item is off while a recording or a
@@ -83,9 +104,14 @@ Pause (P), Frame step (`.`) and Turbo (Tab) work. At its end the game pauses
 and says so; **File > Stop replay** goes back to the title (the game
 restarts). Agents and tests play one with `MEMORIES_PLAY=file.yfmreplay`,
 which ends the game at the replay's end when headless or when
-`MEMORIES_CONTROL` is set (a control client gets no answer from a pause; the
-menu's restart never carries `MEMORIES_CONTROL`). The control channel has no
-play command.
+`MEMORIES_CONTROL` is set (a control client gets no answer from a pause). The
+menu's restart drops `MEMORIES_CONTROL`, so a menu play keeps its pause,
+unless a scripted check puts the variable back through
+`MEMORIES_RESTART_ENV`: then the play ends the game, as one with a client
+does. The rule keys on the variable, not on an attached client: it is there
+from the first frame, and the game waits for the client at start, so a
+client that is late or has left does not turn the end into a pause a script
+waits on. The control channel has no play command.
 
 **A replay never writes the player's saves.** It is unpacked into the user
 folder's `replays/.playing/`, and for as long as the game runs its
@@ -154,4 +180,13 @@ replay (from here) stays the default.
 Tests: `tests/pc/player_replay_test.py` (CTest `pc_player_replay`) records
 through the control channel's `record_boot PATH` (what the menu item does after
 its question), checks the package has no state file and a boot start, and
-plays it back frame for frame.
+plays it back frame for frame (through `MEMORIES_PLAY`, headless: the unpack,
+the scratch progress and the playback File > Play replay... shares; not the
+menu item and its restart through `next.txt`, a window's clock, the audio
+FIFO or the tower guards). It also checks that a leftover marker is dropped
+and starts nothing. The FIFO's fades and joins, and the pacer's decision
+(`AudioFifo_PaceGrid`), are `tests/pc/audio_fifo_test.c`'s (CTest
+`pc_audio_fifo`). A recording's package says "from boot" by its header's
+`start boot` line, not by the folder holding no state: a recording from a
+state that lost its state is refused (the folder is kept), not packed as one
+from boot.

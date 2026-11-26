@@ -118,7 +118,7 @@ build with the old combination; the eight smoke cases unchanged.
 | `quit` | exit |
 | `jump TARGET [OPPONENT [DECK]]` | another screen, as Debug > Jump to goes there (step 6; added with it) |
 | `record PATH` / `record stop` | a player's recording from here, as Game > Record replay makes one (notes/replays.md): PATH a `.yfmreplay`, or a plain recording with its start state beside it; the `ok` comes at the next point, after the start state is loaded |
-| `record_boot PATH` | Game > Record replay from boot...: the game restarts and records PATH (a `.yfmreplay`, with no start state) from its first frame; the `ok` comes before the restart, no client follows the new game (a restart drops `MEMORIES_CONTROL`), and the game, with the environment it had, ends the recording when it exits; refused while a recording or a play runs |
+| `record_boot PATH` | Game > Record replay from boot...: the game restarts and records PATH (a `.yfmreplay`, with no start state) from its first frame; the `ok` comes before the restart (a restart that works never returns, so no reply can wait for it): when it fails the request is taken back and the connection is closed, so the client sees EOF as it does after a working restart, and tells them apart by connecting again (only a game that did not restart answers); no client follows the new game (a restart drops `MEMORIES_CONTROL`), and the game, with the environment it had, ends the recording when it exits; refused while a recording or a play runs |
 
 **Landed** (`src/pc/debug/control.c`, `control_net.c`, `control_protocol.c`;
 `tools/pc/yfm_control.py` is the client, section 5):
