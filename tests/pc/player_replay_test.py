@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -115,9 +116,68 @@ def from_boot(work: Path) -> None:
     assert checked(folder, played, "from boot") > 500
 
 
+def process_table() -> dict[int, tuple[int, str]]:
+    """{pid: (parent pid, executable name)} of the running processes. Windows only: elsewhere a restart
+    execs the same process, which is the one the test started."""
+    if os.name != "nt":
+        return {}
+    import ctypes
+    from ctypes import wintypes
+
+    class Entry(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD), ("pid", wintypes.DWORD),
+                    ("heap", ctypes.c_size_t), ("module", wintypes.DWORD), ("threads", wintypes.DWORD),
+                    ("parent", wintypes.DWORD), ("priority", wintypes.LONG), ("flags", wintypes.DWORD),
+                    ("exe", ctypes.c_char * 260)]
+
+    kernel = ctypes.WinDLL("kernel32")
+    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel.Process32First.argtypes = kernel.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    snapshot = kernel.CreateToolhelp32Snapshot(2, 0)   # TH32CS_SNAPPROCESS
+    table: dict[int, tuple[int, str]] = {}
+    entry = Entry()
+    entry.size = ctypes.sizeof(Entry)
+    ok = kernel.Process32First(snapshot, ctypes.byref(entry))
+    while ok:
+        table[entry.pid] = (entry.parent, entry.exe.decode("mbcs", "replace").lower())
+        ok = kernel.Process32Next(snapshot, ctypes.byref(entry))
+    kernel.CloseHandle(snapshot)
+    return table
+
+
+def restarted_games(root: int) -> set[int]:
+    """The game processes that descend from `root`, the process the test started, and are still running.
+    A Windows restart is the crash monitor starting the game again (a child of the monitor, which is root) or,
+    with no monitor, a new process started by the one that ends: its parent id is that dead process's. The
+    test never started either itself, so it finds them here, by their parent chain and the executable's
+    name, and ends them by pid only."""
+    table = process_table()
+    family = {root}
+    grown = True
+    while grown:
+        grown = False
+        for pid, (parent, name) in table.items():
+            if parent in family and pid not in family and name == EXE.name.lower():
+                family.add(pid)
+                grown = True
+    return {pid for pid in family if pid in table}
+
+
+def end_restarted_games(root: int) -> None:
+    for pid in restarted_games(root):
+        try:
+            os.kill(pid, signal.SIGTERM)   # Windows: TerminateProcess of this pid
+        except OSError:
+            pass
+
+
 def wait_for_package(game: yfm_control.Game, file: Path, timeout: float = 600) -> None:
-    """The restarted game (no client follows it: Linux execs the same process, Windows starts another and
-    ends this one) ends by itself at MEMORIES_DUMP_FRAME and packs the file; its parts folder goes last."""
+    """The restarted game (no client follows it: Linux execs the same process; on Windows the monitor, or
+    the game itself, starts another) ends by itself at MEMORIES_DUMP_FRAME and packs the file; its parts
+    folder goes last."""
+    root = game.process.pid
     parts = Path(str(file) + ".parts")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -126,10 +186,12 @@ def wait_for_package(game: yfm_control.Game, file: Path, timeout: float = 600) -
         time.sleep(0.5)
     else:
         raise AssertionError(f"{file} was not made; see {game.log_path}")
-    try:
-        code = game.process.wait(timeout=120)
-    except subprocess.TimeoutExpired:
-        raise AssertionError(f"the restarted game did not end; see {game.log_path}") from None
+    deadline = time.monotonic() + 120
+    while (game.process.poll() is None or restarted_games(root)) and time.monotonic() < deadline:
+        time.sleep(0.5)
+    left = restarted_games(root)
+    assert game.process.poll() is not None and not left,         f"the restarted game did not end (pids {sorted(left)}); see {game.log_path}"
+    code = game.process.returncode
     assert code == 0, f"the restarted game ended with {code}; see {game.log_path}"
 
 
@@ -159,6 +221,7 @@ def record_from_boot_item(work: Path) -> Path:
         game.command(f"record_boot {file}")   # "ok", then the restart
         wait_for_package(game, file)
     finally:
+        end_restarted_games(game.process.pid)   # on a failure or a timeout: by pid, never by name
         game.close()
     with zipfile.ZipFile(file) as archive:
         names = set(archive.namelist())
