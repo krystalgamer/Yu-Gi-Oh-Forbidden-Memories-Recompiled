@@ -44,6 +44,9 @@ typedef struct {
     int primed;              /* consumer only */
     int16_t last[2];         /* consumer only: the last frame taken from the queue, unfaded */
     uint32_t level;          /* consumer only: the fade's gain, 0 to AUDIO_FIFO_FADE */
+    int16_t heard[2];        /* consumer only: the last frame AudioFifo_Fade gave the device */
+    int16_t join[2];         /* consumer only: the frame a skip's crossfade starts from */
+    uint32_t join_left;      /* consumer only: frames of that crossfade still to do */
     uint32_t dropped;        /* producer only: frames that found the ring full */
     uint32_t underruns;      /* written by the consumer only; read through AudioFifo_Underruns */
     uint32_t skipped;        /* written by the consumer only; read through AudioFifo_Skipped */
@@ -92,8 +95,24 @@ static inline void AudioFifo_Push(AudioFifo *fifo, const int16_t *frames, size_t
     __atomic_store_n(&fifo->head, head + (uint32_t)count, __ATOMIC_RELEASE);
 }
 
+/* Consumer: the first frames of `out` crossfaded from the frame `from` over
+ * the `*left` frames still owed (AUDIO_FIFO_FADE at the start), so a sound
+ * that jumps (the device's own mixer to the FIFO's and back, or the FIFO
+ * across a skip) is heard to move from one to the other, not to cut. */
+static inline void AudioFifo_Join(const int16_t from[2], uint32_t *left, int16_t *out, size_t count)
+{
+    size_t i;
+    for (i = 0; i < count && *left; i++, (*left)--) {
+        int32_t k = (int32_t)(AUDIO_FIFO_FADE - *left + 1u), rest = (int32_t)AUDIO_FIFO_FADE - k;
+        out[i * 2] = (int16_t)((from[0] * rest + out[i * 2] * k) / (int32_t)AUDIO_FIFO_FADE);
+        out[i * 2 + 1] = (int16_t)((from[1] * rest + out[i * 2 + 1] * k) / (int32_t)AUDIO_FIFO_FADE);
+    }
+}
+
 /* Consumer: `count` frames into `out`, silence where there are none. Returns
- * how many came from the queue (the rest is the silence). */
+ * how many came from the queue (the rest is the silence). A pop that skips
+ * (queued past AUDIO_FIFO_MOST) leaves the crossfade from what the device
+ * last heard to the frames after the skip for AudioFifo_Fade. */
 static inline size_t AudioFifo_Pop(AudioFifo *fifo, int16_t *out, size_t count)
 {
     uint32_t head = __atomic_load_n(&fifo->head, __ATOMIC_ACQUIRE), tail = fifo->tail;
@@ -104,6 +123,11 @@ static inline size_t AudioFifo_Pop(AudioFifo *fifo, int16_t *out, size_t count)
         __atomic_store_n(&fifo->skipped, fifo->skipped + skip, __ATOMIC_RELAXED);
         tail += skip;
         queued -= skip;
+        /* After a silence (level 0) the fade in is the join; heard may be
+         * digital zero at full level, which a skip to loud frames still cuts. */
+        fifo->join[0] = fifo->heard[0];
+        fifo->join[1] = fifo->heard[1];
+        fifo->join_left = fifo->level ? AUDIO_FIFO_FADE : 0;
     }
     if (!fifo->primed && queued >= AUDIO_FIFO_PRIME) fifo->primed = 1;
     take = fifo->primed ? (queued < count ? queued : count) : 0;
@@ -146,9 +170,16 @@ static inline void AudioFifo_Fade(AudioFifo *fifo, int16_t *out, size_t take, si
         out[i * 2 + 1] = (int16_t)(fifo->last[1] * (int32_t)level / (int32_t)AUDIO_FIFO_FADE);
     }
     fifo->level = level;
+    /* A skip's jump, crossfaded; frames that did not come leave none to do. */
+    if (take) AudioFifo_Join(fifo->join, &fifo->join_left, out, take);
+    else fifo->join_left = 0;
+    if (count) {
+        fifo->heard[0] = out[(count - 1) * 2];
+        fifo->heard[1] = out[(count - 1) * 2 + 1];
+    }
 }
 
-/* The pacer's rule (platform_common.c, pace()), for a game at 100 % whose
+/* The pacer's rule, for a game at 100 % whose
  * FIFO a device drains: the real time to the VBlank after this one, from
  * `period` us at the game speed and `queued` frames, and whether a VBlank
  * already late may still come at once to catch up (*catch_up). Above the
@@ -167,24 +198,76 @@ static inline uint64_t AudioFifo_PacePeriod(uint32_t queued, uint64_t period, in
     return period;
 }
 
+/* The whole decision of platform_common.c's pace(), for the game and for
+ * tests/pc/audio_fifo_test.c alike, so the two cannot drift apart: the grid
+ * `*next` (the real time of the coming VBlank) at `now`, a VBlank `period`
+ * us long. A stall (more than 100 ms late) starts the grid again at `now`;
+ * with `by_fifo` the period is AudioFifo_PacePeriod's for the `queued`
+ * frames, and a VBlank already late, with the sound queued, does not come
+ * back to back. Returns the real time to wait until before the VBlank, and
+ * moves `*next` on by the period. Reads and writes no FIFO: when the host
+ * sleeps, never what the game sees. */
+static inline uint64_t AudioFifo_PaceGrid(uint64_t *next, uint64_t now, uint64_t period, int by_fifo, uint32_t queued)
+{
+    uint64_t wake;
+    if (!*next || now > *next + 100000u) *next = now;
+    if (by_fifo) {
+        int catch_up;
+        period = AudioFifo_PacePeriod(queued, period, &catch_up);
+        if (!catch_up && *next < now) *next = now;
+    }
+    wake = *next;
+    *next += period;
+    return wake;
+}
+
 /* The device thread's switch between this FIFO and its own mixer. A thread
  * calls AudioFifoGate_Call each time its device asks for sound; the game
  * thread flips the gate with AudioFifoGate_Switch, which returns only when
  * no call that began before it is still running: after a switch off, the
  * FIFO is nobody's and may be reset; after a switch on, the thread's own
  * mixer is not running any more and the game thread may take it over. A
- * call that begins after the flip sees it (sequentially consistent). */
+ * call that begins after the flip sees it (sequentially consistent).
+ *
+ * The device hears the hand-over as a crossfade over AUDIO_FIFO_FADE frames,
+ * from the last frame it was given by one side to the first ones of the
+ * other: the FIFO's silence before its first frames fades the device mixer's
+ * last frame out, and the device mixer, back, fades in from the FIFO's last.
+ * The fields below are the calling thread's alone, apart from `on` and
+ * `in_call`, so the gate's ordering is the one above. */
 typedef struct {
-    int on;      /* atomic: calls play the FIFO */
-    int in_call; /* atomic: a thread is inside AudioFifoGate_Call */
+    int on;             /* atomic: calls play the FIFO */
+    int in_call;        /* atomic: a thread is inside AudioFifoGate_Call */
+    int fifo_played;    /* calling thread only: the last call played the FIFO */
+    int16_t heard[2];   /* calling thread only: the last frame given to the device */
+    int16_t from[2];    /* calling thread only: the frame the hand-over crossfade starts from */
+    uint32_t join_left; /* calling thread only: frames of that crossfade still to do */
 } AudioFifoGate;
 
 static inline void AudioFifoGate_Call(AudioFifoGate *gate, AudioFifo *fifo, int16_t *out, size_t count,
                                       void (*own_mix)(int16_t *, size_t))
 {
+    int fifo_on;
     __atomic_store_n(&gate->in_call, 1, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&gate->on, __ATOMIC_SEQ_CST)) AudioFifo_Fade(fifo, out, AudioFifo_Pop(fifo, out, count), count);
+    fifo_on = __atomic_load_n(&gate->on, __ATOMIC_SEQ_CST);
+    if (fifo_on) AudioFifo_Fade(fifo, out, AudioFifo_Pop(fifo, out, count), count);
     else own_mix(out, count);
+    /* A flip since the last call starts the crossfade from the last frame
+     * this thread gave (from silence there is nothing to join). It touches
+     * the gate's own fields only, and the call is still inside the gate. */
+    if (fifo_on != gate->fifo_played) {
+        gate->fifo_played = fifo_on;
+        gate->from[0] = gate->heard[0];
+        gate->from[1] = gate->heard[1];
+        /* Only a hand-over to the FIFO from silence needs none (its own fade
+         * in is that); one to the device's mixer is always faded in. */
+        gate->join_left = (!fifo_on || gate->from[0] || gate->from[1]) ? AUDIO_FIFO_FADE : 0;
+    }
+    AudioFifo_Join(gate->from, &gate->join_left, out, count);
+    if (count) {
+        gate->heard[0] = out[(count - 1) * 2];
+        gate->heard[1] = out[(count - 1) * 2 + 1];
+    }
     __atomic_store_n(&gate->in_call, 0, __ATOMIC_SEQ_CST);
 }
 

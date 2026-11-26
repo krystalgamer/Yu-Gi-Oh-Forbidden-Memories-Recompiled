@@ -800,7 +800,7 @@ static void pace(void)
 #ifndef _WIN32
     struct timespec nap = {0, 500000};
 #endif
-    uint64_t now, period;
+    uint64_t now, period, wake;
     if (!deterministic_paced || controlled) return;
     while (rate == 0 && !step_pending && !Platform_ShouldQuit()) {
         deterministic_last_wait = now_us(); /* waiting, not spinning (advance) */
@@ -819,22 +819,18 @@ static void pace(void)
     }
     period = (uint64_t)vblank_period * 100u / (unsigned)rate;
     now = now_us();
-    if (!pace_next || now > pace_next + 100000u) pace_next = now; /* a stall: start the grid again */
-    if (fifo_paces()) {
-        int catch_up;
-        period = AudioFifo_PacePeriod(AudioFifo_Queued(&audio_fifo), period, &catch_up);
-        if (!catch_up && pace_next < now) pace_next = now; /* late, but the sound is queued: no VBlanks back to back */
-    }
-    while (now < pace_next) {
+    /* The grid, a stall's restart and the FIFO's nudge: fifo.h, which the
+     * tests run too. */
+    wake = AudioFifo_PaceGrid(&pace_next, now, period, fifo_paces(), AudioFifo_Queued(&audio_fifo));
+    while (now < wake) {
 #ifdef _WIN32
-        sleep_toward(now, pace_next, ~0u);
+        sleep_toward(now, wake, ~0u);
 #else
-        struct timespec rest = {0, (long)(pace_next - now) * 1000};
+        struct timespec rest = {0, (long)(wake - now) * 1000};
         nanosleep(&rest, NULL);
 #endif
         now = now_us();
     }
-    pace_next += period;
 }
 
 void Platform_PollTime(void)
