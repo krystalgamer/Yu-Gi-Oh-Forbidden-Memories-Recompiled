@@ -21,6 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
 
 #define AUDIO_FIFO_FRAMES 16384u /* 372 ms; a power of two */
 #define AUDIO_FIFO_PRIME 2048u   /* 46 ms queued before sound starts again */
@@ -31,13 +32,26 @@ typedef struct {
     uint32_t head, tail;     /* written (producer) and read (consumer) counts, mod 2^32 */
     int primed;              /* consumer only */
     uint32_t dropped;        /* producer only: frames that found the ring full */
-    uint32_t underruns;      /* consumer only: calls that ran dry */
-    uint32_t skipped;        /* consumer only: frames skipped to bound the latency */
+    uint32_t underruns;      /* written by the consumer only; read through AudioFifo_Underruns */
+    uint32_t skipped;        /* written by the consumer only; read through AudioFifo_Skipped */
 } AudioFifo;
 
+/* Only while no consumer is inside AudioFifo_Pop (AudioFifoGate_Switch waits
+ * for that). */
 static inline void AudioFifo_Reset(AudioFifo *fifo)
 {
     memset(fifo, 0, sizeof(*fifo));
+}
+
+/* The consumer's counts, for another thread to read. */
+static inline uint32_t AudioFifo_Underruns(const AudioFifo *fifo)
+{
+    return __atomic_load_n(&fifo->underruns, __ATOMIC_RELAXED);
+}
+
+static inline uint32_t AudioFifo_Skipped(const AudioFifo *fifo)
+{
+    return __atomic_load_n(&fifo->skipped, __ATOMIC_RELAXED);
 }
 
 /* Producer: the frames just mixed. */
@@ -66,7 +80,7 @@ static inline void AudioFifo_Pop(AudioFifo *fifo, int16_t *out, size_t count)
     size_t i, take;
     if (queued > AUDIO_FIFO_MOST) {
         uint32_t skip = queued - AUDIO_FIFO_PRIME;
-        fifo->skipped += skip;
+        __atomic_store_n(&fifo->skipped, fifo->skipped + skip, __ATOMIC_RELAXED);
         tail += skip;
         queued -= skip;
     }
@@ -79,9 +93,37 @@ static inline void AudioFifo_Pop(AudioFifo *fifo, int16_t *out, size_t count)
     }
     if (take < count) {
         memset(out + take * 2, 0, (count - take) * 2 * sizeof(int16_t));
-        if (fifo->primed) fifo->underruns++;
+        if (fifo->primed) __atomic_store_n(&fifo->underruns, fifo->underruns + 1, __ATOMIC_RELAXED);
         fifo->primed = 0;
     }
     __atomic_store_n(&fifo->tail, tail + (uint32_t)take, __ATOMIC_RELEASE);
+}
+
+/* The device thread's switch between this FIFO and its own mixer. A thread
+ * calls AudioFifoGate_Call each time its device asks for sound; the game
+ * thread flips the gate with AudioFifoGate_Switch, which returns only when
+ * no call that began before it is still running: after a switch off, the
+ * FIFO is nobody's and may be reset; after a switch on, the thread's own
+ * mixer is not running any more and the game thread may take it over. A
+ * call that begins after the flip sees it (sequentially consistent). */
+typedef struct {
+    int on;      /* atomic: calls play the FIFO */
+    int in_call; /* atomic: a thread is inside AudioFifoGate_Call */
+} AudioFifoGate;
+
+static inline void AudioFifoGate_Call(AudioFifoGate *gate, AudioFifo *fifo, int16_t *out, size_t count,
+                                      void (*own_mix)(int16_t *, size_t))
+{
+    __atomic_store_n(&gate->in_call, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&gate->on, __ATOMIC_SEQ_CST)) AudioFifo_Pop(fifo, out, count);
+    else own_mix(out, count);
+    __atomic_store_n(&gate->in_call, 0, __ATOMIC_SEQ_CST);
+}
+
+static inline void AudioFifoGate_Switch(AudioFifoGate *gate, int on)
+{
+    struct timespec nap = {0, 200000};
+    __atomic_store_n(&gate->on, on != 0, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&gate->in_call, __ATOMIC_SEQ_CST)) nanosleep(&nap, NULL);
 }
 #endif

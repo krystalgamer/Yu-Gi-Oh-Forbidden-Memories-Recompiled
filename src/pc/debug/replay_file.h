@@ -30,6 +30,8 @@ int ReplayFile_Begin(const char *file, char *recording, size_t recording_size, c
 /* Packs the working folder into `file` and removes it: 0, or -1 with why
  * (the folder is then kept, for the player to look at). */
 int ReplayFile_Finish(const char *file, char *why, size_t why_size);
+/* Removes the working folder of a recording that did not start. */
+void ReplayFile_Abandon(const char *file);
 /* Unpacks `file` for playing: the paths of its recording and start state
  * (empty when it starts from boot) and of the progress folder to use.
  * 0, or -1 with why. */

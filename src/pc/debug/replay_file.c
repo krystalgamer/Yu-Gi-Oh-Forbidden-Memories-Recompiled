@@ -287,6 +287,12 @@ int ReplayFile_Finish(const char *file, char *why, size_t why_size)
     return 0;
 }
 
+void ReplayFile_Abandon(const char *file)
+{
+    char work[1100];
+    if (!work_folder(file, work, sizeof(work)) && !access(work, F_OK)) Mods_ImportRemoveTree(work);
+}
+
 /* --- playing ------------------------------------------------------------ */
 
 int ReplayFile_Open(const char *file, char *recording, size_t recording_size, char *state, size_t state_size,

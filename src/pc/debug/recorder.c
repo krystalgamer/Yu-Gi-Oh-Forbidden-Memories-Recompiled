@@ -68,27 +68,43 @@ static void begin(void)
     start_frame = Memories_PresentedFrames();
 }
 
+static size_t command_room;
+
 static void add_command(unsigned index, unsigned frame, const char *text)
 {
-    static size_t room;
     size_t length = strcspn(text, "\r\n");
     char *copy = malloc(length + 1);
     if (!copy) return;
-    if (command_count == room) {
+    if (command_count == command_room) {
         Command *grown;
-        room = room ? room * 2 : 64;
+        size_t room = command_room ? command_room * 2 : 64;
         grown = realloc(commands, room * sizeof(*commands));
         if (!grown) {
             free(copy);
             return;
         }
         commands = grown;
+        command_room = room;
     }
     memcpy(copy, text, length);
     copy[length] = '\0';
     commands[command_count].index = index;
     commands[command_count].frame = frame;
     commands[command_count++].line = copy;
+}
+
+/* What read_script took, given back: a file refused is no script. */
+static void drop_script(void)
+{
+    size_t i;
+    for (i = 0; i < command_count; i++) free(commands[i].line);
+    free(commands);
+    free(script);
+    commands = NULL;
+    script = NULL;
+    script_count = command_count = command_room = 0;
+    command_at = script_at = 0;
+    play_has_end = 0;
 }
 
 static void read_script(const char *path)
@@ -224,8 +240,7 @@ static int open_player_replay(const char *file, char *recording, size_t size)
         notify("Replay not played",
                "%s holds control commands (a poke or a jump), which a player's replay never has; it was not played.",
                file, NULL);
-        script_count = command_count = 0;
-        play_has_end = 0;
+        drop_script();
         return -1;
     }
     Paths_SetProgressDir(progress);
@@ -462,8 +477,10 @@ int Recorder_Start(const char *path, char *why, size_t why_size)
         return -1;
     }
     if (packed) {
-        if (ReplayFile_Begin(path, recording_path, sizeof(recording_path), state, sizeof(state), why, why_size))
+        if (ReplayFile_Begin(path, recording_path, sizeof(recording_path), state, sizeof(state), why, why_size)) {
+            ReplayFile_Abandon(path); /* a copy that failed halfway left its folder */
             return -1;
+        }
     } else {
         snprintf(recording_path, sizeof(recording_path), "%s", path);
         snprintf(state, sizeof(state), "%s.start.state", path);
@@ -471,6 +488,7 @@ int Recorder_Start(const char *path, char *why, size_t why_size)
     snprintf(out_path, sizeof(out_path), "%s", recording_path);
     if (!(out = fopen(recording_path, "w"))) {
         snprintf(why, why_size, "Could not write %.200s.", recording_path);
+        if (packed) ReplayFile_Abandon(path);
         return -1;
     }
     Platform_SetSteppedAudio(1);
@@ -482,6 +500,7 @@ int Recorder_Start(const char *path, char *why, size_t why_size)
         remove(recording_path);
         Platform_SetVirtualClock(0);
         Platform_SetSteppedAudio(0);
+        if (packed) ReplayFile_Abandon(path);
         return -1;
     }
     write_header(packed ? "start.state" : state);
@@ -501,6 +520,7 @@ int Recorder_Start(const char *path, char *why, size_t why_size)
     zip_path[0] = '\0';
     stop_recording();
     remove(recording_path);
+    if (packed) ReplayFile_Abandon(path);
     return -1;
 }
 

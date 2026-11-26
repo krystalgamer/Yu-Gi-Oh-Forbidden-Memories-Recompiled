@@ -122,8 +122,7 @@ static uint32_t mix_owed;     /* whole frames owed: held (a save state), or step
 static void (*thread_mix)(int16_t *, size_t); /* what a device or sink thread mixes (Platform_AudioThreadStarted) */
 static int stepped_wanted;                    /* a replay asked for it */
 static int stepped_by_request;                /* stepped_mixer is thread_mix through the FIFO */
-static int fifo_on;                           /* atomic: the threads play the FIFO */
-static int thread_in_mix;                     /* atomic: a thread is inside Platform_ThreadMix */
+static AudioFifoGate fifo_gate;               /* the threads play the FIFO, or mix (fifo.h) */
 static AudioFifo audio_fifo;
 
 static void mix_owe(unsigned us)
@@ -528,6 +527,11 @@ void Platform_SetVirtualClock(int on)
             if (clock_rebase) clock_rebase(virtual_now);
         } else {
             real_prev = now;
+            /* Virtual time stood on while this clock ran: when the last VBlank
+             * was due and came are stale, and a vsynced present would take
+             * them for a VBlank long past (Platform_NotifyPresent). The last
+             * one is now. */
+            vblank_due_at = vblank_came_at = virtual_now;
             if (clock_rebase) clock_rebase(now);
         }
     }
@@ -1060,23 +1064,18 @@ int Platform_StartSilentAudio(void (*mix)(int16_t *, size_t), const char *dump_p
 
 void Platform_ThreadMix(int16_t *out, size_t frames)
 {
-    __atomic_store_n(&thread_in_mix, 1, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&fifo_on, __ATOMIC_SEQ_CST)) AudioFifo_Pop(&audio_fifo, out, frames);
-    else thread_mix(out, frames);
-    __atomic_store_n(&thread_in_mix, 0, __ATOMIC_SEQ_CST);
+    AudioFifoGate_Call(&fifo_gate, &audio_fifo, out, frames, thread_mix);
 }
 
 static void stepped_audio(int on)
 {
-    struct timespec nap = {0, 200000};
     if (on) {
         /* No thread to take over (headless under MEMORIES_DETERMINISTIC,
          * which already steps, or no sound started yet), or done. */
         if (stepped_by_request || !thread_mix || stepped_mixer) return;
         AudioFifo_Reset(&audio_fifo);
         mix_fraction = mix_owed = 0;
-        __atomic_store_n(&fifo_on, 1, __ATOMIC_SEQ_CST);
-        while (__atomic_load_n(&thread_in_mix, __ATOMIC_SEQ_CST)) nanosleep(&nap, NULL);
+        AudioFifoGate_Switch(&fifo_gate, 1);
         stepped_mixer = thread_mix;
         stepped_by_request = 1;
         fprintf(stderr, "memories-pc: audio: the game thread mixes as the virtual clock steps; the device plays it "
@@ -1085,7 +1084,9 @@ static void stepped_audio(int on)
         stepped_mixer = NULL;
         stepped_by_request = 0;
         mix_fraction = mix_owed = 0;
-        __atomic_store_n(&fifo_on, 0, __ATOMIC_SEQ_CST);
+        /* A thread that read the gate as on may still be inside AudioFifo_Pop,
+         * and the next start resets the FIFO: the switch waits until it has left. */
+        AudioFifoGate_Switch(&fifo_gate, 0);
         fprintf(stderr, "memories-pc: audio: the device mixes again\n");
     }
 }
@@ -1105,6 +1106,6 @@ void Platform_SetSteppedAudio(int on)
 void Platform_AudioFifoStats(unsigned *dropped, unsigned *underruns, unsigned *skipped)
 {
     if (dropped) *dropped = audio_fifo.dropped;
-    if (underruns) *underruns = audio_fifo.underruns;
-    if (skipped) *skipped = audio_fifo.skipped;
+    if (underruns) *underruns = AudioFifo_Underruns(&audio_fifo);
+    if (skipped) *skipped = AudioFifo_Skipped(&audio_fifo);
 }

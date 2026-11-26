@@ -13,7 +13,13 @@
  *     three digests must be the same.
  *  2. The consumer's side: frames come out in the order they went in, with
  *     gaps only where the ring was full (dropped at the push) or the latency
- *     was cut (skipped at the pop), and silence only on an underrun. */
+ *     was cut (skipped at the pop), and silence only on an underrun.
+ *  3. Stopping and starting again (platform_common.c, stepped_audio): once
+ *     AudioFifoGate_Switch(off) has returned, no consumer is inside the FIFO
+ *     any more, so the reset the next start makes cannot meet a pop. A
+ *     consumer thread calls the gate as a device does, and the game side
+ *     switches on, fills the ring and switches off, over and over; after
+ *     each off the ring must stand still, and a reset leaves it empty. */
 #include "pc/audio/fifo.h"
 #include "pc/audio/replace.h"
 #include "pc/audio/spu.h"
@@ -227,6 +233,66 @@ static int order_check(void)
     return failed;
 }
 
+static AudioFifoGate gate;
+static volatile int churning;
+static unsigned own_mixes;
+
+static void own_mix(int16_t *out, size_t count)
+{
+    memset(out, 0, count * 2 * sizeof(int16_t));
+    own_mixes++;
+}
+
+static void *device(void *unused)
+{
+    static int16_t out[2048 * 2];
+    (void)unused;
+    while (__atomic_load_n(&churning, __ATOMIC_ACQUIRE)) AudioFifoGate_Call(&gate, &fifo, out, 2048, own_mix);
+    return NULL;
+}
+
+static int churn_check(void)
+{
+    static int16_t frames[1024 * 2];
+    pthread_t thread;
+    unsigned round, bad = 0;
+    memset(frames, 1, sizeof(frames));
+    churning = 1;
+    if (pthread_create(&thread, NULL, device, NULL)) return 1;
+    for (round = 0; round < 3000; round++) {
+        uint32_t head, tail, underruns, skipped;
+        unsigned i;
+        /* The start: reset (the device is on its own mixer), then on. */
+        AudioFifo_Reset(&fifo);
+        AudioFifoGate_Switch(&gate, 1);
+        /* The game's frames, enough to be primed and taken, and more than
+         * MOST, so a pop is long (it skips, then copies) when the stop comes. */
+        for (i = 0; i < 10; i++) AudioFifo_Push(&fifo, frames, 1024);
+        if (round % 3) nap_us(rnd() % 200);
+        /* The stop. */
+        AudioFifoGate_Switch(&gate, 0);
+        head = fifo.head;
+        tail = fifo.tail;
+        underruns = AudioFifo_Underruns(&fifo);
+        skipped = AudioFifo_Skipped(&fifo);
+        nap_us(100);
+        if (head != fifo.head || tail != fifo.tail || underruns != AudioFifo_Underruns(&fifo) ||
+            skipped != AudioFifo_Skipped(&fifo)) {
+            bad++;
+        }
+    }
+    __atomic_store_n(&churning, 0, __ATOMIC_RELEASE);
+    pthread_join(thread, NULL);
+    AudioFifo_Reset(&fifo);
+    if (fifo.head || fifo.tail || fifo.primed || AudioFifo_Underruns(&fifo) || AudioFifo_Skipped(&fifo)) {
+        fprintf(stderr, "audio_fifo_test: a reset left the ring not empty\n");
+        return 1;
+    }
+    if (bad) fprintf(stderr, "audio_fifo_test: a consumer was still in the FIFO after %u stops\n", bad);
+    else printf("audio_fifo_test: 3000 stops and starts, the ring still after each stop\n");
+    return bad != 0;
+}
+
 int main(void)
 {
     uint64_t alone, steady, greedy;
@@ -240,5 +306,6 @@ int main(void)
         fprintf(stderr, "audio_fifo_test: the game's side depends on how the device drains\n");
         return 1;
     }
-    return order_check();
+    if (order_check()) return 1;
+    return churn_check();
 }
