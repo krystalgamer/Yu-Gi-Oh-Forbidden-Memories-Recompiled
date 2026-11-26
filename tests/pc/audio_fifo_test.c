@@ -284,6 +284,10 @@ static int churn_check(void)
     __atomic_store_n(&churning, 0, __ATOMIC_RELEASE);
     pthread_join(thread, NULL);
     AudioFifo_Reset(&fifo);
+    if (!own_mixes) {
+        fprintf(stderr, "audio_fifo_test: the device never ran its own mixer, so the stops were not tried\n");
+        return 1;
+    }
     if (fifo.head || fifo.tail || fifo.primed || AudioFifo_Underruns(&fifo) || AudioFifo_Skipped(&fifo)) {
         fprintf(stderr, "audio_fifo_test: a reset left the ring not empty\n");
         return 1;

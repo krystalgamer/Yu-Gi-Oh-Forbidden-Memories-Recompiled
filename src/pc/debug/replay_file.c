@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h> /* access, F_OK (compat/fs.h has it on Windows) */
 
 #define RECORDING_MAX (256ul << 20) /* about 50 hours of pad changes and frame hashes */
 #define STATE_MAX (64ul << 20)      /* a save state is under 8 MB */
