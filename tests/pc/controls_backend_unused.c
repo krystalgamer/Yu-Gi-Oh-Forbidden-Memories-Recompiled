@@ -9,6 +9,8 @@
     void name(void) { fputs("Unexpected game call: " #name "\n", stderr); abort(); }
 
 UNUSED_GAME_FUNCTION(Platform_StartSilentAudio)
+UNUSED_GAME_FUNCTION(Platform_AudioThreadStarted)
+UNUSED_GAME_FUNCTION(Platform_ThreadMix)
 UNUSED_GAME_FUNCTION(Monitor_Shared)
 UNUSED_GAME_FUNCTION(Menu_LoadSettingsWithoutMods)
 UNUSED_GAME_FUNCTION(Menu_LoadMods)
