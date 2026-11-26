@@ -1,10 +1,12 @@
 /* The input recorder and player (recorder.h). */
 #include "pc/compat/fs.h"
 #include "recorder.h"
+#include "replay_file.h"
 #include "control.h"
 #include "control_protocol.h"
 #include "pc/debug/monitor.h"
 #include "pc/guest/state.h"
+#include "pc/platform/paths.h"
 #include "pc/platform/platform.h"
 #include "pc/sdk/display.h"
 #include "pc/compat/signal.h"
@@ -23,6 +25,16 @@ typedef struct {
 static enum { WAITING, RUNNING } phase;
 static int recording, playing, started;
 static unsigned start_vblank;        /* the VBlank count the indices count from */
+static unsigned start_frame;         /* and the presented frame the frames count from (a state does not carry it) */
+static int at_exit;
+/* The player's format (replay_file.h): a recording started at run time, or
+ * a .yfmreplay playing. Pads only: a host action or a client's command
+ * ends it (Recorder_HostAction). */
+static int player_record, player_play;
+static char zip_path[600];           /* recording: the .yfmreplay it becomes ("" for a plain one) */
+static volatile int start_asked;     /* Game > Record replay: at the next point */
+static char notice_title[64], notice_text[700];
+static volatile int notice_pending;
 static FILE *out;
 static char out_path[600];
 static unsigned states_every, last_state;
@@ -53,6 +65,7 @@ static void begin(void)
     started = 1;
     phase = RUNNING;
     start_vblank = Platform_VBlankCount();
+    start_frame = Memories_PresentedFrames();
 }
 
 static void add_command(unsigned index, unsigned frame, const char *text)
@@ -140,19 +153,102 @@ static void write_facts(void)
 static void finish(void)
 {
     if (!out) return;
-    fprintf(out, "E %u %u\n", started ? Platform_VBlankCount() - start_vblank : 0, Memories_PresentedFrames());
+    fprintf(out, "E %u %u\n", started ? Platform_VBlankCount() - start_vblank : 0,
+            started ? Memories_PresentedFrames() - start_frame : 0);
     fclose(out);
     out = NULL;
 }
 
+static void notify(const char *title, const char *format, const char *a, const char *b)
+{
+    snprintf(notice_title, sizeof(notice_title), "%s", title);
+    snprintf(notice_text, sizeof(notice_text), format, a ? a : "", b ? b : "");
+    notice_pending = 1;
+    fprintf(stderr, "memories-pc: replay: %s: %s\n", notice_title, notice_text);
+}
+
+/* The E line and, for a player's recording, its .yfmreplay: 0, or -1
+ * with a notice when it could not be packed. */
+static int end_recording(void)
+{
+    char why[300];
+    int failed = 0;
+    finish();
+    recording = 0;
+    started = 0;
+    if (zip_path[0]) {
+        failed = ReplayFile_Finish(zip_path, why, sizeof(why));
+        if (failed) notify("Replay not saved", "The recording could not be packed into %s: %s", zip_path, why);
+        zip_path[0] = '\0';
+    }
+    return failed;
+}
+
+static int stop_recording(void);
+
+static void at_exit_end(void)
+{
+    if (recording) end_recording();
+}
+
+/* The header: what made it, and where it starts. */
+static void write_header(const char *state)
+{
+    fprintf(out, "yfm-recording 1\nbuild %08x\n", (unsigned)Memories_StateBuildId());
+    if (state && *state) fprintf(out, "start state %s\n", state);
+    else fprintf(out, "start boot\n");
+    write_facts();
+    fflush(out);
+    if (!at_exit) {
+        at_exit = 1;
+        atexit(at_exit_end);
+    }
+}
+
+/* A .yfmreplay to play (MEMORIES_PLAY, or the one File > Play replay...
+ * left for this start): unpacked, its progress made the game's for this
+ * run, its start state the one loaded at startup. 0 with the recording's
+ * path in `recording`, -1 when it cannot be played (with a notice). */
+static int open_player_replay(const char *file, char *recording, size_t size)
+{
+    static char state[1200], progress[1200];
+    char why[400];
+    if (ReplayFile_Open(file, recording, size, state, sizeof(state), progress, sizeof(progress), why, sizeof(why))) {
+        notify("Replay not played", "%s could not be read: %s", file, why);
+        return -1;
+    }
+    read_script(recording);
+    /* Players' replays hold the pads only: a poke or a jump is the control
+     * channel's, which a stranger's file has no business running. */
+    if (command_count) {
+        notify("Replay not played",
+               "%s holds control commands (a poke or a jump), which a player's replay never has; it was not played.",
+               file, NULL);
+        script_count = command_count = 0;
+        play_has_end = 0;
+        return -1;
+    }
+    Paths_SetProgressDir(progress);
+    if (state[0]) setenv("MEMORIES_LOAD_STATE", state, 1);
+    else unsetenv("MEMORIES_LOAD_STATE");
+    player_play = 1;
+    fprintf(stderr, "memories-pc: replay: playing %s (the saves it writes go to %s)\n", file, progress);
+    return 0;
+}
+
 void Recorder_Init(void)
 {
+    static char next[1024], unpacked[1200];
     const char *record = getenv("MEMORIES_RECORD"), *play = getenv("MEMORIES_PLAY");
-    const char *state = getenv("MEMORIES_LOAD_STATE"), *every = getenv("MEMORIES_RECORD_STATES");
-    if (play && *play) {
+    const char *state, *every = getenv("MEMORIES_RECORD_STATES");
+    if (!(play && *play) && !ReplayFile_TakeNext(next, sizeof(next))) play = next;
+    if (play && *play && ReplayFile_Is(play)) {
+        if (!open_player_replay(play, unpacked, sizeof(unpacked))) playing = 1;
+    } else if (play && *play) {
         playing = 1;
         read_script(play);
     }
+    state = getenv("MEMORIES_LOAD_STATE");
     if (record && *record) {
         snprintf(out_path, sizeof(out_path), "%s", record);
         out = fopen(record, "w");
@@ -160,16 +256,14 @@ void Recorder_Init(void)
             fprintf(stderr, "memories-pc: record: cannot write %s\n", record);
         } else {
             recording = 1;
-            fprintf(out, "yfm-recording 1\nbuild %08x\n", (unsigned)Memories_StateBuildId());
-            if (state && *state) fprintf(out, "start state %s\n", state);
-            else fprintf(out, "start boot\n");
-            write_facts();
-            fflush(out);
-            atexit(finish);
+            write_header(state);
         }
-        states_every = every ? (unsigned)strtoul(every, NULL, 10) : 0;
     }
+    states_every = every ? (unsigned)strtoul(every, NULL, 10) : 0;
     if (!recording && !playing) return;
+    /* Only the virtual clock replays, with the sound mixed as it steps. */
+    Platform_SetVirtualClock(1);
+    Platform_SetSteppedAudio(1);
     /* From boot the indices are the VBlank count; from a state they start
      * once the state is in (Recorder_Point). */
     if (state && *state) phase = WAITING;
@@ -181,7 +275,8 @@ void Recorder_Pads(uint16_t bits[2], uint16_t fixed[2], int *pad2_connected)
     unsigned index;
     if (!recording && !playing) return;
     if (phase != RUNNING) {
-        if (playing) bits[0] = bits[1] = fixed[0] = fixed[1] = 0, *pad2_connected = 0;
+        /* Until the start state is in: the same nothing, recording or playing. */
+        bits[0] = bits[1] = fixed[0] = fixed[1] = 0, *pad2_connected = 0;
         return;
     }
     index = Platform_VBlankCount() - start_vblank;
@@ -218,11 +313,14 @@ void Recorder_Pads(uint16_t bits[2], uint16_t fixed[2], int *pad2_connected)
 
 void Recorder_Command(const char *line)
 {
+    if (player_record || player_play) {
+        Recorder_HostAction("A control client's command");
+        return;
+    }
     if (!recording || !out || phase != RUNNING) return;
     fprintf(out, "C %u %u %s\n", point_index, point_frame, line);
     fflush(out);
 }
-
 uint16_t Recorder_HostPad(int port, uint16_t live)
 {
     return playing || (recording && phase == RUNNING) ? played[port & 1] : live;
@@ -231,12 +329,32 @@ uint16_t Recorder_HostPad(int port, uint16_t live)
 void Recorder_Point(unsigned frame)
 {
     unsigned index, i;
+    if (start_asked) {
+        /* Game > Record replay, taken at this state point. Does not return
+         * when it starts (the start state is loaded). */
+        char file[600], why[300];
+        start_asked = 0;
+        if (ReplayFile_NewName(file, sizeof(file))) {
+            notify("Recording not started", "No name could be made for the replay in %s.", Paths_UserDir(), NULL);
+        } else if (Recorder_Start(file, why, sizeof(why))) {
+            notify("Recording not started", "%s", why, NULL);
+        }
+    }
     if (!recording && !playing) return;
     if (phase == WAITING) {
         if (!Memories_StateStartupDone()) return;
+        if (player_play && Memories_StateStartupFailed()) {
+            /* Played on a game booting from scratch, the pads would mean nothing. */
+            playing = 0;
+            notify("Replay not played",
+                   "Its start state could not be loaded (made by another version of the game, or damaged): "
+                   "the reason is in the log.%s%s", NULL, NULL);
+            return;
+        }
         begin();
     }
     index = Platform_VBlankCount() - start_vblank;
+    frame -= start_frame;
     if (recording && out) {
         /* The VBlank's buffer, taken whole: with MEMORIES_CLOCK=interrupt
          * the timer may append to it at any moment. */
@@ -277,7 +395,8 @@ void Recorder_Point(unsigned frame)
             dropped = 0;
         }
         fprintf(out, "H %u %u %016llx\n", index, frame, Memories_VramHash());
-        if (states_every && index - last_state >= states_every) {
+        /* A .yfmreplay carries no checkpoint (its parts folder goes when it is packed). */
+        if (states_every && !zip_path[0] && index - last_state >= states_every) {
             char path[700];
             snprintf(path, sizeof(path), "%s.%u.state", out_path, index);
             if (!Memories_StateSaveHere(path)) {
@@ -309,10 +428,149 @@ void Recorder_Point(unsigned frame)
         }
     }
     /* The end: its VBlank and its frame (a game closed between two VBlanks
-     * presents twice in the last one). */
+     * presents twice in the last one). A player's replay in a window pauses
+     * there, and offers the way back; any other play ends the game. */
     if (playing && play_has_end && (index > play_end || (index == play_end && frame >= play_end_frame))) {
         fprintf(stderr, "memories-pc: replay: the recording ends at VBlank %u; done\n", play_end);
         playing = 0;
-        Platform_RequestQuit();
+        if (player_play && !getenv("MEMORIES_HEADLESS")) {
+            Platform_SetClockRate(0);
+            notify("Replay finished", "The replay is over. File > Stop replay goes back to the title.", NULL, NULL);
+        } else {
+            Platform_RequestQuit();
+        }
     }
+}
+
+/* Recording from here: the virtual clock and the stepped mixer from this
+ * VSync on, a start state taken here and loaded at once, so that the
+ * recording begins as a play of it does: at the first VSync after a load,
+ * with only what the state holds. `path` is a .yfmreplay, packed when the
+ * recording stops (replay_file.h), or a plain recording, its start state
+ * beside it as `path`.start.state. */
+int Recorder_Start(const char *path, char *why, size_t why_size)
+{
+    char recording_path[sizeof(out_path)], state[sizeof(out_path) + 16];
+    int packed = ReplayFile_Is(path);
+    if (recording || playing || player_play) {
+        snprintf(why, why_size, recording ? "Already recording." :
+                 playing ? "A replay is playing." : "A replay was played: File > Stop replay goes back to the title first.");
+        return -1;
+    }
+    if (strlen(path) >= sizeof(zip_path)) {
+        snprintf(why, why_size, "The path is too long.");
+        return -1;
+    }
+    if (packed) {
+        if (ReplayFile_Begin(path, recording_path, sizeof(recording_path), state, sizeof(state), why, why_size))
+            return -1;
+    } else {
+        snprintf(recording_path, sizeof(recording_path), "%s", path);
+        snprintf(state, sizeof(state), "%s.start.state", path);
+    }
+    snprintf(out_path, sizeof(out_path), "%s", recording_path);
+    if (!(out = fopen(recording_path, "w"))) {
+        snprintf(why, why_size, "Could not write %.200s.", recording_path);
+        return -1;
+    }
+    Platform_SetSteppedAudio(1);
+    Platform_SetVirtualClock(1);
+    if (Memories_StateSaveHere(state)) {
+        snprintf(why, why_size, "The start state was not saved (not at a state point: try again).");
+        fclose(out);
+        out = NULL;
+        remove(recording_path);
+        Platform_SetVirtualClock(0);
+        Platform_SetSteppedAudio(0);
+        return -1;
+    }
+    write_header(packed ? "start.state" : state);
+    snprintf(zip_path, sizeof(zip_path), "%s", packed ? path : "");
+    recording = 1;
+    player_record = 1;
+    started = 0;
+    phase = WAITING;
+    have_last = 0;
+    pending_count = dropped = 0;
+    clock_written = 0;
+    last_state = 0;
+    fprintf(stderr, "memories-pc: record: recording to %s from a state taken at VBlank %u\n", path,
+            Platform_VBlankCount());
+    /* Returns only when the load was refused. */
+    Memories_StateLoadHere(state, why, why_size);
+    zip_path[0] = '\0';
+    stop_recording();
+    remove(recording_path);
+    return -1;
+}
+
+/* Ends a recording: 0 when it is saved, -1 when it was not (with a
+ * notice). */
+static int stop_recording(void)
+{
+    int failed = end_recording();
+    fprintf(stderr, "memories-pc: record: stopped\n");
+    player_record = 0;
+    if (!playing) {
+        Platform_SetVirtualClock(0);
+        Platform_SetSteppedAudio(0);
+    }
+    return failed;
+}
+
+int Recorder_Stop(void)
+{
+    char saved[sizeof(zip_path)];
+    if (!recording) return -1;
+    snprintf(saved, sizeof(saved), "%s", zip_path);
+    if (!stop_recording() && saved[0]) notify("Replay saved", "%s%s", saved, NULL);
+    return 0;
+}
+
+int Recorder_Recording(void) { return recording; }
+int Recorder_PlayingReplay(void) { return player_play; }
+
+void Recorder_RequestStart(void)
+{
+#ifdef __ANDROID__
+    /* The phone keeps its mixer thread (platform_common.c): no replay there yet. */
+    notify("Recording not started", "Replays are not on Android yet.", NULL, NULL);
+#else
+    if (player_play) {
+        notify("Recording not started", "A replay was played: File > Stop replay goes back to the title first.",
+               NULL, NULL);
+    } else if (!recording && !playing) {
+        start_asked = 1;
+    }
+#endif
+}
+
+void Recorder_HostAction(const char *what)
+{
+    if (recording && player_record) {
+        char saved[sizeof(zip_path)];
+        snprintf(saved, sizeof(saved), "%s", zip_path);
+        if (!stop_recording()) {
+            notify("Recording stopped",
+                   "%s is not part of a replay, so the recording ended just before it. The replay is saved: %s", what,
+                   saved);
+        }
+    } else if (playing && player_play) {
+        playing = 0; /* the pads are the player's again */
+        notify("Replay stopped", "%s ended the replay. File > Stop replay goes back to the title.", what, NULL);
+    }
+}
+
+void Recorder_BeforeRestart(void)
+{
+    if (recording) Recorder_Stop();
+}
+
+int Recorder_TakeNotice(char *title, size_t title_size, char *text, size_t text_size)
+{
+    if (!notice_pending) return 0;
+    notice_pending = 0;
+    snprintf(title, title_size, "%s", notice_title);
+    snprintf(text, text_size, "%s", notice_text);
+    return 1;
 }

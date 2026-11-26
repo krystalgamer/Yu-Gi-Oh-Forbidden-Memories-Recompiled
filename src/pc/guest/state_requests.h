@@ -9,6 +9,7 @@
 typedef struct MemoriesStateRequests {
     volatile sig_atomic_t requested, slot;
     int startup_done, scripted_done, autosave_read;
+    int startup_failed; /* MEMORIES_LOAD_STATE's load came back: it was refused */
     unsigned scripted_frame, autosave_every, autosave_frame, autosave_index;
     const char *scripted_path;
 } MemoriesStateRequests;

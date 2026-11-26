@@ -953,6 +953,7 @@ static int from_game_code(void)
 }
 
 int Memories_StateStartupDone(void) { return requests.startup_done; }
+int Memories_StateStartupFailed(void) { return requests.startup_failed; }
 
 static void load_requested(const char *path, int slot)
 {

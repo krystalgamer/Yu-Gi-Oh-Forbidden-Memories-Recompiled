@@ -120,7 +120,7 @@ static Card *open_card(PSXLONG channel)
 {
     int slot = channel >> 4 ? 1 : 0;
     Card *card = &cards[slot];
-    const char *named = getenv(slot ? "MEMORIES_MEMCARD2" : "MEMORIES_MEMCARD1");
+    const char *named = Paths_ProgressDir() ? NULL : getenv(slot ? "MEMORIES_MEMCARD2" : "MEMORIES_MEMCARD1");
     FILE *file;
     if ((channel & 0xf) != 0) {
         return NULL; /* no multitap */

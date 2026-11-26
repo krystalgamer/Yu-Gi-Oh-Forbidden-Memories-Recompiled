@@ -11,6 +11,7 @@
 #include "pc/platform/settings.h"
 #include "pc/platform/paths.h"
 #include "pc/platform/mods_window.h"
+#include "pc/debug/recorder.h"
 #include "pc/mods/mods.h"
 #include "pc/mods/exports.h"
 #include "pc/platform/game_files.h"
@@ -64,6 +65,7 @@ static void restart_environment(void)
 
 int Platform_RestartGame(void)
 {
+    Recorder_BeforeRestart(); /* TerminateProcess skips atexit: the recording's E line and its file */
     ModsWindow_StopJobs(); /* TerminateProcess skips atexit: no cut-off export is left behind */
     unsetenv("MEMORIES_CONTROL"); /* no client follows a restart (MEMORIES_RESTART_ENV may name one) */
     restart_environment();
@@ -92,6 +94,7 @@ int Platform_RestartGame(void)
     free(path);
     if (!executable) return -1; /* restart only a verified absolute pathname */
  #endif
+    Recorder_BeforeRestart(); /* execv skips atexit: the recording's E line and its file */
     ModsWindow_StopJobs(); /* execv skips atexit: no cut-off export is left behind */
     struct itimerval stopped = {0}, previous;
     struct sigaction ignored = {0}, old_action;

@@ -13,6 +13,8 @@ files in a zip (.yfmreplay, to pass around):
                    states (S) and the end (E)
     scenario.py    scripted: run(game, out) on tools/pc/yfm_control.py; its
                    assertions are the verdict, so it survives timing changes
+    progress/      a player's replay (Game > Record replay, notes/replays.md): the
+                   saves as they were when it began, put in the play's user folder
     mods.py        optional: make(folder, root) writes the data mods the run had
                    into folder and returns their ids (made from the repository and
                    the player's disc at play time, as a texture pack's images
@@ -245,6 +247,9 @@ def play_recorded(replay: Replay, executable: Path, out: Path, timeout: float,
                   more_env: dict[str, str] | None = None) -> Path | None:
     out.mkdir(parents=True, exist_ok=True)
     (out / "user").mkdir(exist_ok=True)
+    if replay.meta.get("progress") and replay.file(replay.meta["progress"]).is_dir():
+        # A player's replay (Game > Record replay): the saves as they were when it began.
+        shutil.copytree(replay.file(replay.meta["progress"]), out / "user", dirs_exist_ok=True)
     settings = out / "settings.txt"
     mods = None
     if replay.meta.get("mods"):

@@ -387,8 +387,39 @@ static int join(char *out, size_t size, const char *root, const char *relative, 
     return 0;
 }
 
+/* The player's progress (Paths_SetProgressDir): the save slots, what they
+ * keep beside them by token, and the memory card images. */
+static const char *const PROGRESS[] = {"saves", "cards", "packs", "duelists", "decks", "tower", "memcard1.mcd",
+                                       "memcard2.mcd"};
+static char progress_dir[PATH_MAX_];
+
+int Paths_IsProgress(const char *relative)
+{
+    size_t i, length = relative ? strcspn(relative, "/") : 0;
+    for (i = 0; i < sizeof(PROGRESS) / sizeof(PROGRESS[0]); i++) {
+        if (length == strlen(PROGRESS[i]) && !strncmp(relative, PROGRESS[i], length)) return 1;
+    }
+    return 0;
+}
+
+const char *Paths_ProgressName(int index)
+{
+    return index >= 0 && (size_t)index < sizeof(PROGRESS) / sizeof(PROGRESS[0]) ? PROGRESS[index] : NULL;
+}
+
+void Paths_SetProgressDir(const char *directory)
+{
+    snprintf(progress_dir, sizeof(progress_dir), "%s", directory ? directory : "");
+}
+
+const char *Paths_ProgressDir(void)
+{
+    return progress_dir[0] ? progress_dir : NULL;
+}
+
 int Paths_User(char *out, size_t size, const char *relative)
 {
+    if (progress_dir[0] && Paths_IsProgress(relative)) return join(out, size, progress_dir, relative, 1);
     return join(out, size, Paths_UserDir(), relative, 1);
 }
 

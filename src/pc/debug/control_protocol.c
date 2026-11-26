@@ -161,6 +161,11 @@ int ControlProtocol_Parse(char *line, ControlCommand *command, uint8_t *data, ch
             snprintf(error, error_size, "usage: %s PATH", name);
             return -1;
         }
+    } else if (!strcmp(name, "record")) {
+        command->kind = CONTROL_RECORD;
+        command->path = rest(&cursor);
+        if (!*command->path) return fail(error, error_size, "usage: record PATH | record stop");
+        if (!strcmp(command->path, "stop")) command->path = NULL;
     } else if (!strcmp(name, "hash") || !strcmp(name, "info") || !strcmp(name, "quit")) {
         command->kind = name[0] == 'h' ? CONTROL_HASH : name[0] == 'i' ? CONTROL_INFO : CONTROL_QUIT;
         if (!at_end(&cursor)) {

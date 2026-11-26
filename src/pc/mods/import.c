@@ -1193,6 +1193,16 @@ outside:
 
 /* --- Modpacks (import.h): one file out of the .zip, a .zip written, SHA-256 */
 
+const char *Mods_ImportFile(const ModsImport *import, int index)
+{
+    int i, files = 0;
+    for (i = 0; import && i < import->count; i++) {
+        if (import->entries[i].folder) continue;
+        if (files++ == index) return import->entries[i].name;
+    }
+    return NULL;
+}
+
 int Mods_ImportExtract(ModsImport *import, const char *name, const char *path, unsigned long max, char *why,
                        size_t why_size)
 {

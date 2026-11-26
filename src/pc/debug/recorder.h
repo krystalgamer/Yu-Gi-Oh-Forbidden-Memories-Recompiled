@@ -25,7 +25,9 @@
  *                                     when something changed.
  *     H <index> <frame> <hash>        at every safe point (the end of a
  *                                     VSync(0)): the VBlank, the presented
- *                                     frame and Memories_VramHash
+ *                                     frame (counted from the start too: a
+ *                                     state does not carry it) and
+ *                                     Memories_VramHash
  *     S <index> <frame> <path>        a save state taken there, every
  *                                     MEMORIES_RECORD_STATES VBlanks
  *     C <index> <frame> <line>        a control client's `poke` or `jump`,
@@ -44,7 +46,22 @@
  * (tools/pc/replay.py), C lines included. Host actions (F5/F7, the deck
  * slots, the menus) and the client's `load` are not recorded.
  *
+ * Either runs the game on the virtual clock with the stepped mixer
+ * (platform.h, Platform_SetVirtualClock and Platform_SetSteppedAudio):
+ * only those make a run that plays back, window and sound or not.
+ *
+ * The player's replays (notes/replays.md, replay_file.h): Game > Record
+ * replay (or the client's `record PATH`) starts recording at a VSync, from
+ * a start state taken there and loaded at once, and Stop ends it with its E
+ * line (so does a restart, which skips atexit on Windows); a .yfmreplay
+ * holds it with the player's progress. File > Play replay... restarts into
+ * one, or MEMORIES_PLAY names it: its progress is a scratch copy, and a file
+ * with a C line is refused. A host action while either runs (a state load,
+ * the deck slots, a cheat, Jump to, a mod turned on or off, a client's
+ * command) ends it with a notice instead of being recorded or played.
+ *
  * Unset, both cost one test per VBlank and one per frame. */
+#include <stddef.h>
 #include <stdint.h>
 
 /* ResetCallback: read MEMORIES_PLAY's file, open MEMORIES_RECORD's. */
@@ -61,5 +78,28 @@ void Recorder_Point(unsigned frame);
 /* A control client's poke or jump, done at the point Recorder_Point just
  * passed (control.c): kept as a C line. */
 void Recorder_Command(const char *line);
+/* At run time, from the end of a VSync(0) (a state point): start recording
+ * to `path`, a .yfmreplay (packed at the stop) or a plain recording (its
+ * start state beside it, `path`.start.state); or stop, which writes the E
+ * line (-1 when none ran). Start does not return when it succeeds: the start
+ * state is loaded at once and the game resumes in its VSync caller. -1 with
+ * why. */
+int Recorder_Start(const char *path, char *why, size_t why_size);
+int Recorder_Stop(void);
+int Recorder_Recording(void);
+/* Game > Record replay: a new .yfmreplay in the user folder's replays/,
+ * started at the next state point. Main thread. */
+void Recorder_RequestStart(void);
+/* A player's replay is playing (or has ended, the game paused). */
+int Recorder_PlayingReplay(void);
+/* Something a replay cannot hold is about to happen (`what`, a phrase that
+ * starts a sentence: "Load state"): a player's recording stops before it,
+ * a player's replay stops playing; both with a notice. Main thread. */
+void Recorder_HostAction(const char *what);
+/* Platform_RestartGame, before it ends this process: a recording ends and
+ * is saved, as atexit would have it. */
+void Recorder_BeforeRestart(void);
+/* The notice the recorder has for the player, once: 1 with it, else 0. */
+int Recorder_TakeNotice(char *title, size_t title_size, char *text, size_t text_size);
 
 #endif

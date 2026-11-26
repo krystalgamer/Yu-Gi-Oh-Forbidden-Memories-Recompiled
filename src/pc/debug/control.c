@@ -419,6 +419,7 @@ static int handle(char *text)
     case CONTROL_LOAD:
         /* Does not return when the state loads: the game resumes in the
          * state's VSync caller and the "ok" goes out at the next point. */
+        Recorder_HostAction("A control client's load");
         owed = 1;
         Platform_ControlHold(0);
         if (Memories_StateLoadHere(command.path, error, sizeof(error)) == -2) {
@@ -443,6 +444,21 @@ static int handle(char *text)
             Recorder_Command(kept);
             send_line("ok");
         }
+        return 0;
+    case CONTROL_RECORD:
+        if (!command.path) {
+            if (Recorder_Stop()) send_error("not recording");
+            else send_line("ok");
+            return 0;
+        }
+        /* As a load: the start state is loaded at once, and the "ok" goes
+         * out at the next point. */
+        owed = 1;
+        Platform_ControlHold(0);
+        Recorder_Start(command.path, error, sizeof(error));
+        Platform_ControlHold(1);
+        owed = 0;
+        send_error(error);
         return 0;
     case CONTROL_QUIT:
         send_line("ok");
