@@ -55,7 +55,7 @@ static void draw_stats(MenuCanvas *canvas)
     const FrameStats *stats = Memories_FrameStats();
     char line[512], rate[32] = "";
     int level = Settings_Get(SET_SHOW_HUD), y, queued, lba, music = 0, sfx = 0, v, s = Menu_Scale();
-    unsigned underruns, bytes_per_second;
+    unsigned underruns, bytes_per_second, fifo_queued, fifo_skipped;
     const char *tail[8];
     int tail_count, i;
     bounds.x = bounds.y = bounds.w = bounds.h = 0;
@@ -90,8 +90,15 @@ static void draw_stats(MenuCanvas *canvas)
              stats->missed_vblanks, stats->draw_words, stats->draw_us, Platform_PresentCap(),
              Platform_PresentPeriodUs());
     text(canvas, bounds.x + 10 * s, &y, line);
-    Platform_AudioStats(&queued, &underruns);
-    snprintf(line, sizeof(line), "audio queued %d frames, underruns %u", queued, underruns);
+    /* While a replay records or plays, the device plays the game's frames
+     * from the stepped mixer's FIFO: its own fill and counts. */
+    if (Platform_AudioFifoStats(&fifo_queued, NULL, &underruns, &fifo_skipped)) {
+        snprintf(line, sizeof(line), "audio FIFO %u ms queued, underruns %u, skipped %u frames",
+                 fifo_queued * 1000u / 44100u, underruns, fifo_skipped);
+    } else {
+        Platform_AudioStats(&queued, &underruns);
+        snprintf(line, sizeof(line), "audio queued %d frames, underruns %u", queued, underruns);
+    }
     text(canvas, bounds.x + 10 * s, &y, line);
     Memories_DiscStats(&lba, &bytes_per_second);
     snprintf(line, sizeof(line), "disc LBA %d, %u bytes/s", lba, bytes_per_second);

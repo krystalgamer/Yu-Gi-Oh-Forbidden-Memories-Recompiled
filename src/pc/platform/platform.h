@@ -359,5 +359,9 @@ void Platform_SetSteppedAudio(int on);
  * file, -1 cancelled, -2 with why, 0 nothing (yet). Main thread. */
 void Platform_ChooseReplay(void);
 int Platform_ChosenReplay(char *path, size_t size, char *why, size_t why_size);
-void Platform_AudioFifoStats(unsigned *dropped, unsigned *underruns, unsigned *skipped);
+/* While the stepped mixer's FIFO is on (a replay records or plays): 1, with
+ * the frames queued (the latency), those dropped at a full ring, the
+ * device's underruns and the frames it skipped (src/pc/audio/fifo.h); 0 and
+ * nothing filled in otherwise. The HUD's audio line. */
+int Platform_AudioFifoStats(unsigned *queued_frames, unsigned *dropped, unsigned *underruns, unsigned *skipped);
 #endif

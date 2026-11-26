@@ -1140,9 +1140,12 @@ void Platform_SetSteppedAudio(int on)
     stepped_audio(stepped_wanted);
 }
 
-void Platform_AudioFifoStats(unsigned *dropped, unsigned *underruns, unsigned *skipped)
+int Platform_AudioFifoStats(unsigned *queued_frames, unsigned *dropped, unsigned *underruns, unsigned *skipped)
 {
+    if (!stepped_by_request) return 0;
+    if (queued_frames) *queued_frames = AudioFifo_Queued(&audio_fifo);
     if (dropped) *dropped = audio_fifo.dropped;
     if (underruns) *underruns = AudioFifo_Underruns(&audio_fifo);
     if (skipped) *skipped = AudioFifo_Skipped(&audio_fifo);
+    return 1;
 }
