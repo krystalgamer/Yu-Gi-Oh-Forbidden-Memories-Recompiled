@@ -36,6 +36,25 @@ When a recording starts:
   `decks/`, `tower/`) and the memory card images (`memcard1.mcd`,
   `memcard2.mcd`), as they are at the start.
 
+**Game > Record replay from boot...** is the other kind. Where Record replay
+starts from the game as it is (a start state), this one restarts the game and
+records from its first frame, so the file holds **no start state**: nothing of
+the game's RAM, which is the disc's code and data, only what the player
+pressed and their own progress. Choose it when the replay is to be shared.
+It is menu-only (no key, so the Controls list does not grow) and not on
+Android, like the other replay items. It asks first, as Game > Restart game
+and File > Stop replay do ("Restart the game and record a replay from its
+first frame? Unsaved progress is lost."; Cancel is the default): a restart
+drops what is not saved. (File > Play replay... restarts without asking.)
+The restart is the one that item uses (`Platform_RestartGame`); the name of
+the new file is left in `replays/next-record.txt`, as Play replay leaves its
+file's in `next.txt`, and the next start takes it (`Recorder_Init`) and
+records from the first VSync, on the virtual clock from frame 0. The game that
+comes up is an ordinary boot (the logos, then the title), with the player's
+saves as they were when the game restarted. Stop and a restart
+end it as for a recording from here. The item is off while a recording or a
+replay is on.
+
 What is recorded is the pad bits the game reads at every VBlank, from every
 source (keyboard, controllers, the mouse's and the touch controls' buttons),
 with a frame hash at every frame, and a header: the build, the OS, the
@@ -79,7 +98,9 @@ progress hashes the same before and after a replay that saves.
 A `.yfmreplay` is the zip `tools/pc/replay.py` reads (format 1, kind
 `recorded`, `replay_file.h`): `replay.json` (the header, `"player": true`,
 `"progress": "progress"`), `recording.txt` (`recorder.h`'s lines, from
-`start state start.state`), `start.state` and `progress/`. `replay.py play
+`start state start.state`, or `start boot`), `start.state` (not in a
+recording from boot, whose `replay.json` says `"start": {"kind": "boot"}`) and
+`progress/` (the save slots and the memory card images, in both kinds). `replay.py play
 file.yfmreplay --check` plays one headless and compares its frames; it puts
 the progress in the play's user folder.
 
@@ -102,13 +123,18 @@ it). A mod's own stored data (`mod-data/`) is not copied.
 Not on Android yet: there are no menu items, and the phone's mixer stays
 on its own thread.
 
-## Open question
+## Which kind to share
 
 A start state holds the game's 2 MiB of RAM, which is the disc's code and
 data as the game unpacked it (and the SPU's 512 KiB of sound RAM, among the
 rest; a start state is about 7.6 MB, 1.2 MB once zipped):
-a shared replay carries part of the game with it. The repository's own
-replays (`tests/pc/replays`) start from boot for that reason. Should a
-player's replay start from boot instead (slower to reach the moment, and
-the progress copy then decides everything), or is a start state in a file
-players share acceptable?
+a shared replay from here carries part of the game with it. The repository's
+own replays (`tests/pc/replays`) start from boot for that reason, and a player
+who does not want to share that records **from boot** (above): slower to
+reach the moment, and the progress copy then decides everything. Record
+replay (from here) stays the default.
+
+Tests: `tests/pc/player_replay_test.py` (CTest `pc_player_replay`) records
+through the control channel's `record_boot PATH` (what the menu item does after
+its question), checks the package has no state file and a boot start, and
+plays it back frame for frame.

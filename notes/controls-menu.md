@@ -62,7 +62,7 @@ The port's own actions are a second list, **Game**, under the pad picture
 same columns: Exit game, Fullscreen, Screenshot, Mute, Volume up and down
 (Program); Save state, Load state, State slot 1 to 4 (Save states); Pause,
 Frame step and Turbo (Speed); Debug HUD, Deck slots and Record replay
-(Tools; [replays](replays.md)). They default to the keys the port always had
+(Tools; [replays](replays.md); Game > Record replay from boot... is menu-only and has no key). They default to the keys the port always had
 (Esc, F11, F12, M, keypad + and -, F5, F7, F1, F2, none, F4, P, `.`, Tab,
 F3, F6), and F8 for Record replay, and to nothing on
 controllers, where either slot takes any button, trigger, stick or D-pad
