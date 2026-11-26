@@ -18,15 +18,25 @@ Headless, on the virtual clock, with SDL's dummy sound:
   4. The same replay with a C line in it is refused: nothing plays. So is one
      whose start state does not load (damaged here): no frame is played onto
      the game booting without it.
+  5. Game > Record replay from boot... (the control channel's `record_boot`,
+     which does what the menu's item does after its question): the game
+     restarts and records from its first frame. The .yfmreplay has no start
+     state at all (replay.json says the start is boot) and still carries the
+     player's progress; the channel refuses it while a recording runs and for
+     a name that is not a .yfmreplay. Its play, by File > Play replay...'s own
+     path (MEMORIES_PLAY), has every frame hash as recorded and leaves the
+     player's saves as they were.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -105,6 +115,88 @@ def from_boot(work: Path) -> None:
     assert checked(folder, played, "from boot") > 500
 
 
+def wait_for_package(game: yfm_control.Game, file: Path, timeout: float = 600) -> None:
+    """The restarted game (no client follows it: Linux execs the same process, Windows starts another and
+    ends this one) ends by itself at MEMORIES_DUMP_FRAME and packs the file; its parts folder goes last."""
+    parts = Path(str(file) + ".parts")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if file.is_file() and not parts.exists():
+            break
+        time.sleep(0.5)
+    else:
+        raise AssertionError(f"{file} was not made; see {game.log_path}")
+    try:
+        code = game.process.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        raise AssertionError(f"the restarted game did not end; see {game.log_path}") from None
+    assert code == 0, f"the restarted game ended with {code}; see {game.log_path}"
+
+
+def record_from_boot_item(work: Path) -> Path:
+    """The control channel's `record_boot`, from a game that is well into its run."""
+    file = work / "boot-item.yfmreplay"
+    user = work / "boot-item-player"
+    (user / "decks").mkdir(parents=True)
+    (user / "decks/DEADBEEF.txt").write_text("player_replay_test\n")
+    presses = "700:0008,706:0000,800:4000,806:0000,950:4000,956:0000"
+    # The restarted game has the old one's environment (a restart keeps it, MEMORIES_CONTROL aside): it
+    # replays these presses from its first frame and ends, closing the recording, at frame 1500.
+    game = yfm_control.Game(EXE, out=work / "boot-item", env={"MEMORIES_INPUT": presses,
+                                                              "MEMORIES_USER_DIR": str(user),
+                                                              "MEMORIES_DUMP_FRAME": "1500",
+                                                              "MEMORIES_DUMP_PATH": str(work / "boot-item.ppm"),
+                                                              "SDL_AUDIODRIVER": "dummy"},
+                            settings={"mod.3d-monsters": 0, "mod.hand-camera": 0})
+    try:
+        game.wait_until(lambda g: g.info()["frame"] >= 1000, 3000, what="frame 1000")
+        try:
+            game.command(f"record_boot {work / 'not-a-replay.txt'}")
+            raise AssertionError("a recording from boot to a name that is not a .yfmreplay was taken")
+        except yfm_control.ControlError as refused:
+            assert ".yfmreplay" in str(refused), refused
+        assert not (user / "replays/next-record.txt").exists(), "a refused request was left for the next start"
+        game.command(f"record_boot {file}")   # "ok", then the restart
+        wait_for_package(game, file)
+    finally:
+        game.close()
+    with zipfile.ZipFile(file) as archive:
+        names = set(archive.namelist())
+        lines = archive.read("recording.txt").decode().splitlines()
+        meta = json.loads(archive.read("replay.json"))
+    for name in ("replay.json", "recording.txt"):
+        assert name in names, f"{file} has no {name}: {sorted(names)}"
+    states = sorted(name for name in names if name.endswith(".state"))
+    assert not states, f"a recording from boot holds a state: {states}"
+    assert meta["start"] == {"kind": "boot"} and meta.get("player") is True, meta
+    assert "progress/decks/DEADBEEF.txt" in names, f"{file} has not the player's progress: {sorted(names)}"
+    assert "start boot" in lines[:3] and lines[-1].startswith("E "), lines[:3] + lines[-2:]
+    assert not any(line.startswith(("C ", "S ")) for line in lines), "a player's recording has a C or S line"
+    frames = [line for line in lines if line.startswith("H ")]
+    assert len(frames) > 500 and frames[0].split()[1] in ("0", "1"), \
+        f"the recording does not start at the game's first frame: {frames[:1]} ({len(frames)} frames)"
+    assert not (user / "replays/next-record.txt").exists(), "the request was not taken at the restart"
+    print(f"player_replay_test: recorded {file.name} from boot through the restart: {len(frames)} frames, "
+          f"{len(names)} files, no state")
+    return file
+
+
+def play_from_boot_item(work: Path, file: Path) -> None:
+    """The file plays back as File > Play replay... plays it, frame for frame, on a fresh player's folder."""
+    user = work / "boot-listener"
+    (user / "saves").mkdir(parents=True)
+    (user / "saves/slot05.sav").write_bytes(bytes(range(256)) * 32)
+    before = progress_digest(user)
+    played = work / "boot-item-played.txt"
+    text = run_game(environment(user, MEMORIES_PLAY=str(file), MEMORIES_RECORD=str(played)),
+                    work / "boot-item-play.log")
+    assert "replay: playing" in text, f"the replay did not play; see {work / 'boot-item-play.log'}"
+    assert before == progress_digest(user), "the play changed the player's saves"
+    assert (user / "replays/.playing/progress/decks/DEADBEEF.txt").is_file(), "the replay's progress was not unpacked"
+    count = checked(file, played, "recorded from boot by the restart")
+    assert count > 500, count
+
+
 def record_at_run_time(work: Path) -> Path:
     file = work / "shop.yfmreplay"
     user = work / "player"
@@ -136,6 +228,11 @@ def record_at_run_time(work: Path) -> Path:
         try:
             game.command(f"record {work / 'second.yfmreplay'}")
             raise AssertionError("a second recording was started")
+        except yfm_control.ControlError as refused:
+            assert "Already recording" in str(refused), refused
+        try:
+            game.command(f"record_boot {work / 'third.yfmreplay'}")
+            raise AssertionError("a recording from boot was started while one runs")
         except yfm_control.ControlError as refused:
             assert "Already recording" in str(refused), refused
         game.wait_until(lambda g: g.info()["frame"] >= 9000, 40000, every=60, what="frame 9000")
@@ -215,6 +312,8 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="player-replay-", dir=os.environ.get("PLAYER_REPLAY_TMP")))
     try:
         from_boot(work)
+        boot_file = record_from_boot_item(work)
+        play_from_boot_item(work, boot_file)
         file = record_at_run_time(work)
         play_without_touching_the_saves(work, file)
         refuse_commands(work, file)
