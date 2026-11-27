@@ -94,7 +94,7 @@ class Game:
     """One headless game on the real clock with the control channel up and no
     wait for a first client, paused by MEMORIES_CRASH_TEST=`crash`@60."""
 
-    def __init__(self, crash: str):
+    def __init__(self, crash: str, frame: int = 60):
         self.crash = crash
         self.work = Path(tempfile.mkdtemp(prefix="control-paused-"))
         settings = self.work / "settings.txt"
@@ -105,7 +105,7 @@ class Game:
         env.update(MEMORIES_DISC=DISC, MEMORIES_HEADLESS="1", MEMORIES_NO_AUDIO="1", SDL_AUDIODRIVER="dummy",
                    MEMORIES_NO_GAMEPAD="1", MEMORIES_NO_UPDATE_CHECK="1", MEMORIES_WATCHDOG="0",
                    MEMORIES_SHOW_HUD="0", MEMORIES_USER_DIR=str(self.work / "user"), MEMORIES_SETTINGS=str(settings),
-                   MEMORIES_CONTROL=str(self.port), MEMORIES_CONTROL_WAIT="0", MEMORIES_CRASH_TEST=f"{crash}@60")
+                   MEMORIES_CONTROL=str(self.port), MEMORIES_CONTROL_WAIT="0", MEMORIES_CRASH_TEST=f"{crash}@{frame}")
         command, wine = yfm_control.launcher(EXE)
         self.log_path = self.work / "game.log"
         with self.log_path.open("wb") as log:
@@ -205,11 +205,11 @@ def paused_game() -> tuple[int, int]:
 def step_in_flight() -> None:
     """A client attached before the pause, with a step in flight: its quit is
     answered with the step's reply (an "err") first, then its own "ok"."""
-    game = Game("pause")
+    game = Game("pause", frame=600)   # time for the client to attach and its step to be taken, whatever the load
     try:
         game.wait_for("control: listening on", "listened")
         client = game.connect()
-        client.send("step 100000")   # taken at the next VSync(0): far past frame 60
+        client.send("step 100000")   # taken at the next VSync(0): far past frame 600
         game.wait_paused()
         assert client.reply(1.0) is None, "a step in flight was answered while the game is paused"
         client.send("quit")

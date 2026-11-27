@@ -684,7 +684,6 @@ static void serve_paused(void)
         }
         attach();
     }
-    ControlNet_RefuseOthers("err busy: another client is attached\n");
     while (!line_held) {
         size_t room;
         char *at;
@@ -717,5 +716,8 @@ static void serve_paused(void)
         ControlLines_Added(&lines, (size_t)count);
     }
     if (attached && line_held) watch_held();
+    /* After the reads, so that a client that has closed is seen first and a
+     * new one that came at once is taken on the next pass, not turned away. */
+    ControlNet_RefuseOthers("err busy: another client is attached\n");
     serving = 0;
 }
