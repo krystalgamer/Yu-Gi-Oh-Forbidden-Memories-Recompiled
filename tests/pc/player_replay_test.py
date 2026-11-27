@@ -139,6 +139,8 @@ def stale_markers(work: Path) -> None:
     log = work / "stale.log"
     text = run_game(environment(user, MEMORIES_DUMP_FRAME="120", MEMORIES_DUMP_PATH=str(work / "stale.ppm")), log)
     assert text.count("is a leftover") == 2, f"the leftovers were not dropped and said so; see {log}"
+    # ...and to the player, not only to the log: each refusal is a notice (Recorder_Init).
+    assert text.count("was too old to be honoured") == 2, f"the player was not told of the leftovers; see {log}"
     for name in ("next-record.txt", "next.txt"):
         assert not (user / "replays" / name).exists(), f"{name} was not removed"
     assert not wanted.exists() and "recording to" not in text, "a leftover marker started a recording"

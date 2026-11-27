@@ -288,9 +288,27 @@ void Recorder_Init(void)
     static char next[1024], unpacked[1200], boot[1024];
     const char *record = getenv("MEMORIES_RECORD"), *play = getenv("MEMORIES_PLAY");
     const char *state, *every = getenv("MEMORIES_RECORD_STATES");
-    /* Taken at every start, so a request that is not honoured does not come back. */
-    int boot_asked = !ReplayFile_TakeNextRecord(boot, sizeof(boot));
-    if (!(play && *play) && !ReplayFile_TakeNext(next, sizeof(next))) play = next;
+    /* Both taken at every start, MEMORIES_PLAY or not, so a request that is
+     * not honoured does not come back. One that was there and was refused
+     * (too old: the restart took long, or never came; or it could not be
+     * removed) is told to the player, who asked for something. */
+    int boot_taken = ReplayFile_TakeNextRecord(boot, sizeof(boot));
+    int next_taken = ReplayFile_TakeNext(next, sizeof(next));
+    int boot_asked = !boot_taken;
+    if (next_taken == 0) {
+        if (play && *play) fprintf(stderr, "memories-pc: replay: MEMORIES_PLAY is set: replays/next.txt is not played\n");
+        else play = next;
+    } else if (next_taken == REPLAY_MARKER_DROPPED) {
+        notify("Replay not played",
+               "The request to play a replay (replays/next.txt) was too old to be honoured, or could not be removed. "
+               "File > Play replay... asks again.", NULL, NULL);
+    }
+    if (boot_taken == REPLAY_MARKER_DROPPED) {
+        notify("Recording not started",
+               "The request to record from boot (replays/next-record.txt) was too old to be honoured, or could not "
+               "be removed: the game took too long to restart, or did not restart. Game > Record replay from boot... "
+               "asks again.", NULL, NULL);
+    }
     if (play && *play && ReplayFile_Is(play)) {
         if (!open_player_replay(play, unpacked, sizeof(unpacked))) playing = 1;
     } else if (play && *play) {

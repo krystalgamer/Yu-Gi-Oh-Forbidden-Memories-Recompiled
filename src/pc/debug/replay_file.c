@@ -263,6 +263,12 @@ int ReplayFile_Finish(const char *file, char *why, size_t why_size)
         return -1;
     }
     snprintf(path, sizeof(path), "%s/recording.txt", work);
+    /* header_json reads "start boot" from it: unread, it would say "from a
+     * state" and the refusal below would blame the state, not the recording. */
+    if (!is_file(path)) {
+        snprintf(why, why_size, "The recording (recording.txt) is missing or cannot be read.");
+        return -1;
+    }
     if (!(json = header_json(path, &json_size, &boot))) {
         snprintf(why, why_size, "Out of memory.");
         return -1;
@@ -394,16 +400,22 @@ static int set_marker(const char *marker, const char *file)
     return fclose(out) ? -1 : 0;
 }
 
-/* A restart starts the game within seconds. A marker older than this is the
- * leftover of a restart that never came (the monitor's start_game failed, or
- * the new process died before Recorder_Init): not an order any more. */
-#define MARKER_FRESH_SECONDS 60
+/* A restart starts the game within seconds, a slow disk or an antivirus scan
+ * within a minute or two. A marker older than this is the leftover of a
+ * restart that never came (the monitor's start_game failed, or the new
+ * process died before Recorder_Init): not an order any more. The clock may
+ * also have been set back between the Set and the Take (a time sync, summer
+ * time does not count: it is the epoch): a marker from the future by up to
+ * MARKER_SKEW_SECONDS is still the order it was. */
+#define MARKER_FRESH_SECONDS 120
+#define MARKER_SKEW_SECONDS 10
 
 /* Takes the marker: the file it names, only when the marker is an order, that
  * is fresh and removed. A stale one, one of the older format (no time line)
  * and one that cannot be removed (an antivirus holds it, a read-only folder:
  * it would be honoured at every start) are dropped, said on stderr, and never
- * honoured. 0 with `file`, or -1. */
+ * honoured. 0 with `file`; REPLAY_MARKER_NONE (no marker); REPLAY_MARKER_DROPPED
+ * (one was there and was not honoured: the caller tells the player). */
 static int take_marker(const char *marker, char *file, size_t size)
 {
     char path[1100], stamp[40];
@@ -413,7 +425,7 @@ static int take_marker(const char *marker, char *file, size_t size)
     /* Asked at every start: no folder is made for it (Paths_User would). */
     if (snprintf(path, sizeof(path), "%s/replays/%s", Paths_UserDir(), marker) >= (int)sizeof(path) ||
         !(in = fopen(path, "r")))
-        return -1;
+        return REPLAY_MARKER_NONE;
     if (!fgets(stamp, (int)sizeof(stamp), in)) stamp[0] = '\0';
     if (!fgets(file, (int)size, in)) file[0] = '\0';
     fclose(in);
@@ -421,16 +433,16 @@ static int take_marker(const char *marker, char *file, size_t size)
     /* Taken once: a replay that crashes the game does not come back at every start. */
     if (remove(path)) {
         fprintf(stderr, "memories-pc: replay: %s cannot be removed, so it is not honoured\n", path);
-        return -1;
+        return REPLAY_MARKER_DROPPED;
     }
     made = strtoll(stamp, &end, 10);
     now = (long long)time(NULL);
-    if (end == stamp || *end != '\n' || made > now || now - made > MARKER_FRESH_SECONDS) {
+    if (end == stamp || *end != '\n' || made - now > MARKER_SKEW_SECONDS || now - made > MARKER_FRESH_SECONDS) {
         fprintf(stderr, "memories-pc: replay: %s is a leftover (made %lld, now %lld), dropped\n", path,
                 end == stamp ? 0LL : made, now);
-        return -1;
+        return REPLAY_MARKER_DROPPED;
     }
-    return file[0] ? 0 : -1;
+    return file[0] ? 0 : REPLAY_MARKER_DROPPED;
 }
 
 /* A request taken back: the restart it was for did not happen. */
