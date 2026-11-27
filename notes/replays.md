@@ -43,8 +43,12 @@ When a recording starts:
   device's own mixer's last frame fades out as the queue's first come up),
   its switch off (the device's own mixer fades in from the FIFO's last
   frame, also after a silence) and a skip past 139 ms at Turbo (also from
-  digital zero at full level). All of it is the consumer's
-  alone (the gate's ordering is unchanged), so the game sees the same. The
+  digital zero at full level). A stop and a start between two calls of the
+  device (the gate reads "on" both times, the FIFO was reset in between) is
+  joined too: every switch counts in the gate's one atomic word, and a call
+  that finds the count moved is handed over from the last frame it gave. All of
+  it is the consumer's alone (the gate's ordering is unchanged), so the game
+  sees the same. The
   HUD's audio line then shows the queue's own numbers: the
   fill in ms, its underruns and the frames skipped.
 - A **start state** is taken and loaded at once (a short hitch), so the
@@ -71,18 +75,32 @@ the new file is left in `replays/next-record.txt`, as Play replay leaves its
 file's in `next.txt`, and the next start takes it (`Recorder_Init`) and
 records from the first VSync, on the virtual clock from frame 0. A marker is
 two lines, the time it was made and the file, and is an order only while
-fresh (under 60 s) and once removed: the leftover of a restart that never
-came (the monitor could not start the game, the new process died first), a
-marker of the older format and one that cannot be removed (a read-only
-folder, an antivirus) are dropped with a line on stderr and never honoured,
-so a later ordinary start does not record or play by itself (`take_marker`,
-replay_file.c, for both markers). When the restart itself fails, the
-request is taken back (`ReplayFile_DropNextRecord`, `ReplayFile_DropNext`)
+fresh (under 120 s, so a slow start or a scan still counts; a clock set back
+by up to 10 s does not spoil it) and once removed: the leftover of a restart
+that never came (the monitor could not start the game, the new process died
+first), a marker of the older format and one that cannot be removed (a
+read-only folder, an antivirus) are dropped with a line on stderr and never
+honoured, so a later ordinary start does not record or play by itself
+(`take_marker`, replay_file.c, for both markers). Both are taken at every
+start, `MEMORIES_PLAY` or not, so none waits for a later one. One that was
+there and was dropped is told to the player too (a notice, as the other
+refusals are): they asked, and nothing happened. The markers are taken in
+`Recorder_Init` and not earlier in `main()`: that keeps the age that of the
+whole startup, and a take in `main()` would meet the Windows monitor
+process, which must leave it to the game. When the restart itself fails,
+the request is taken back (`ReplayFile_DropNextRecord`, `ReplayFile_DropNext`)
 and the player is told: the menu with a notice, the control channel by
 detaching (its `ok` went out before: a restart that works never returns,
 and an `err` after the `ok` would be read as the reply to the next command;
-the client sees EOF either way, and a game that is still there answers a
-new connection). The game that
+the client sees EOF either way). Under the Windows monitor the game ends
+before the restart is tried (`Win32_Restart` only tells the monitor), so it
+cannot take anything back: the monitor does when its `start_game` fails
+(`restart_failed`, monitor.c: both markers, a line in the session log and a
+message box). A restart that fails without the monitor has already dropped
+`MEMORIES_CONTROL` and applied `MEMORIES_RESTART_ENV` in this game's
+environment (`Platform_RestartGame`, before `execv` or `CreateProcessW`):
+a client may connect again, since the listener was set up at start, but the
+end-of-replay rule below reads the variable. The game that
 comes up is an ordinary boot (the logos, then the title), with the player's
 saves as they were when the game restarted. Stop and a restart
 end it as for a recording from here. The item is off while a recording or a
