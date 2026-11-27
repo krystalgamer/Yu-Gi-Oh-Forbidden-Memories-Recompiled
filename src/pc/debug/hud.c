@@ -97,7 +97,7 @@ static void draw_stats(MenuCanvas *canvas)
                  fifo_queued * 1000u / 44100u, underruns, fifo_skipped);
     } else {
         Platform_AudioStats(&queued, &underruns);
-        snprintf(line, sizeof(line), "audio queued %d frames, underruns %u", queued, underruns);
+        snprintf(line, sizeof(line), "audio queued %d frames, late callbacks %u", queued, underruns);
     }
     text(canvas, bounds.x + 10 * s, &y, line);
     Memories_DiscStats(&lba, &bytes_per_second);

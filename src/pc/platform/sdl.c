@@ -25,6 +25,7 @@
 #include "loading.h"
 #include "settings.h"
 #include "pc/audio/spu.h"
+#include "pc/audio/late_callback.h"
 #include "pc/debug/cheats.h"
 #include "pc/cards/cards.h"
 #include "pc/tower/tower.h"
@@ -1456,14 +1457,20 @@ int Gamepad_Connected(int p){return ControlsRuntime_Connected(p);}
 /* --- audio ------------------------------------------------------------ */
 
 static SDL_AudioStream *stream;
+/* Late device callbacks (the HUD's "underruns"; late_callback.h says why
+ * not "the stream is empty at entry", which counted 15177 in 15178
+ * requests). A backend that prebuffers several periods can tolerate a longer
+ * gap without a dropout, so this errs on the high side there. */
 static volatile unsigned audio_underruns;
 
 static void SDLCALL feed(void *userdata, SDL_AudioStream *to, int additional, int total)
 {
     static int16_t buffer[256 * 2];
+    static uint64_t previous_ns;
+    uint64_t now_ns = SDL_GetTicksNS();
     (void)userdata;
-    (void)total;
-    if (SDL_GetAudioStreamQueued(to) == 0) audio_underruns++;
+    if (AudioLate_Is(previous_ns, now_ns, total > additional ? total : additional)) audio_underruns++;
+    previous_ns = now_ns;
     while (additional > 0) {
         Platform_ThreadMix(buffer, 256); /* the mix, or the stepped mixer's frames (platform.h) */
         SDL_PutAudioStreamData(to, buffer, (int)sizeof(buffer));
