@@ -479,8 +479,16 @@ static int handle(char *text)
          * client's next command. A restart that fails (Recorder_BootRestart
          * has taken the request back) detaches the client instead: it sees
          * EOF, as it does when the restart works, and finds out which by
-         * connecting again, which only the game that is still here answers
-         * (a restart drops MEMORIES_CONTROL). */
+         * connecting again. A game that is still here still listens (the
+         * port was read at startup), and a game after a restart that worked
+         * does not: Platform_RestartGame drops MEMORIES_CONTROL (unless
+         * MEMORIES_RESTART_ENV names it again, as a scripted check may). A
+         * restart that failed has changed the environment too (before execv
+         * / CreateProcessW), so this game's MEMORIES_CONTROL may be gone
+         * while its listener is not; recorder.c's end-of-replay rule reads
+         * the variable, and is the one thing that then differs. Under the
+         * Windows monitor the game ends before the restart is tried, and the
+         * monitor takes the request back and tells the player if it fails. */
         send_line("ok");
         if (Recorder_BootRestart(error, sizeof(error))) {
             fprintf(stderr, "memories-pc: control: record_boot: %s\n", error);

@@ -101,6 +101,7 @@ int Monitor_Main(int argc, char **argv, int *status)
 #include <dbghelp.h>
 #include <psapi.h>
 #include <tlhelp32.h>
+#include "replay_file.h"
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -1295,6 +1296,26 @@ static int start_game(HANDLE console_write)
     return 0;
 }
 
+/* The restart the game ended itself for (Win32_Restart) did not come: there is
+ * no game, so nothing else can take back what it left for the restart. A
+ * request for the next start (File > Play replay..., Record replay from
+ * boot...) would otherwise wait for an ordinary launch, days later. Dropped
+ * the way Recorder_BootRestart drops its own, and said to the player. */
+static void restart_failed(const char *why)
+{
+    char message[300];
+    ReplayFile_DropNext();
+    ReplayFile_DropNextRecord();
+    note_session("the restart failed: %s", why);
+    fprintf(stderr, "memories-pc: the game could not restart itself: %s\n", why);
+    if (dialogs_allowed()) {
+        snprintf(message, sizeof(message),
+                 "The game could not restart itself (%s), so it has closed. Start it again; a replay that was "
+                 "asked for is not played or recorded.", why);
+        Platform_ShowError("Yu-Gi-Oh! Forbidden Memories", message);
+    }
+}
+
 /* -1: no monitor, go on as the game. 0: the game ran and ended, *status. */
 static int run_monitor(int *status)
 {
@@ -1367,10 +1388,14 @@ static int run_monitor(int *status)
                     reader = NULL;
                 }
                 CloseHandle(console_read);
-                if (!CreatePipe(&console_read, &again_write, &attributes, 0)) break;
+                if (!CreatePipe(&console_read, &again_write, &attributes, 0)) {
+                    restart_failed("no pipe for its output");
+                    break;
+                }
                 SetHandleInformation(console_read, HANDLE_FLAG_INHERIT, 0);
                 if (start_game(again_write)) {
                     CloseHandle(again_write);
+                    restart_failed("the new process did not start");
                     break;
                 }
                 CloseHandle(again_write);

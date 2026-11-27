@@ -99,6 +99,9 @@ void Recorder_RequestStart(void);
  * replays/) and leaves it for the next start: 0, or -1 with why. Restart
  * then restarts the game (Platform_RestartGame); it returns only when that
  * failed, -1 with why, the request taken back (ReplayFile_DropNextRecord).
+ * Under the Windows monitor the game ends before the restart is tried (the
+ * monitor starts the new one), so Restart does not return even when it will
+ * fail; the monitor takes the request back then (monitor.c, restart_failed).
  * Main thread. */
 int Recorder_BootRequest(const char *path, char *why, size_t why_size);
 int Recorder_BootRestart(char *why, size_t why_size);
