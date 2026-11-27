@@ -30,8 +30,10 @@
  *     on, with the queue empty and with it already primed), where the FIFO
  *     hands back (switch off, also after a silence: the mixer fades in), and
  *     across a skip past AUDIO_FIFO_MOST (also from digital silence at full
- *     level), the last frame the device heard crossfades into the next over
- *     AUDIO_FIFO_FADE frames, with no step bigger than the fade's.
+ *     level), and an off and on again between two calls of the device (the
+ *     gate reads "on" both times; its switch count tells), the last frame the
+ *     device heard crossfades into the next over AUDIO_FIFO_FADE frames, with
+ *     no step bigger than the fade's. A skip's two channels differ in the test.
  *  6. The pacer's rule (AudioFifo_PaceGrid, the function platform_common.c's
  *     pace() calls, so this is the game's own decision): a simulated game
  *     paced to the VBlank grid against a device that pops 256 frames at a
@@ -439,7 +441,8 @@ static void join_smooth(const int16_t *out, size_t count, int before_left, int b
 static int join_check(void)
 {
     static int16_t frames[5000 * 2], out[1024 * 2];
-    const int a_left = 12000, a_right = -9000, own_l = 10000, own_r = -8000, p = 4000, q = -15000;
+    const int a_left = 12000, a_right = -9000, own_l = 10000, own_r = -8000, p = 4000, p_r = -2500, q = -15000,
+                    q_r = 9000; /* a skip's two channels differ, so a swap of them is seen */
     const unsigned fade = AUDIO_FIFO_FADE;
     unsigned i, skipped;
     fade_failed = 0;
@@ -501,10 +504,10 @@ static int join_check(void)
     memset(&gate, 0, sizeof(gate));
     AudioFifo_Reset(&fifo);
     AudioFifoGate_Switch(&gate, 1);
-    for (i = 0; i < 3000; i++) frames[i * 2] = frames[i * 2 + 1] = (int16_t)p;
+    for (i = 0; i < 3000; i++) frames[i * 2] = (int16_t)p, frames[i * 2 + 1] = (int16_t)p_r;
     AudioFifo_Push(&fifo, frames, 3000);
     fade_pop(out, 300, 300); /* heard: p, at full level, 2700 frames left */
-    for (i = 0; i < 5000; i++) frames[i * 2] = frames[i * 2 + 1] = (int16_t)q;
+    for (i = 0; i < 5000; i++) frames[i * 2] = (int16_t)q, frames[i * 2 + 1] = (int16_t)q_r;
     AudioFifo_Push(&fifo, frames, 5000); /* 7700 queued: over MOST */
     fade_pop(out, 200, 200);
     skipped = AudioFifo_Skipped(&fifo);
@@ -514,9 +517,9 @@ static int join_check(void)
     }
     for (i = 0; i < 200; i++) {
         unsigned k = i < fade ? i + 1 : fade;
-        fade_expect(out, i, join_at(p, q, k), join_at(p, q, k), "skip");
+        fade_expect(out, i, join_at(p, q, k), join_at(p_r, q_r, k), "skip");
     }
-    join_smooth(out, 200, p, p, (p - q) / (int)fade + 1, "skip");
+    join_smooth(out, 200, p, p_r, (p - q) / (int)fade + 1, "skip");
     /* 5. A skip from digital silence at full level (the level is up, the frames are
      * zero) to loud frames is joined too: only a level of 0 leaves it to the fade in. */
     AudioFifoGate_Switch(&gate, 0);
@@ -526,19 +529,44 @@ static int join_check(void)
     memset(frames, 0, 3000 * 2 * sizeof(int16_t));
     AudioFifo_Push(&fifo, frames, 3000);
     fade_pop(out, 300, 300); /* heard: zeros, at full level */
-    for (i = 0; i < 5000; i++) frames[i * 2] = frames[i * 2 + 1] = (int16_t)q;
+    for (i = 0; i < 5000; i++) frames[i * 2] = (int16_t)q, frames[i * 2 + 1] = (int16_t)q_r;
     AudioFifo_Push(&fifo, frames, 5000);
     fade_pop(out, 200, 200);
     for (i = 0; i < 200; i++) {
         unsigned k = i < fade ? i + 1 : fade;
-        fade_expect(out, i, join_at(0, q, k), join_at(0, q, k), "skip from silence at full level");
+        fade_expect(out, i, join_at(0, q, k), join_at(0, q_r, k), "skip from silence at full level");
     }
+    /* 6. Off and on again between two calls of the device (record stop, then
+     * record X, both inside one callback's 6 to 46 ms): the gate reads "on"
+     * before and after, so only its switch count tells that the FIFO was reset
+     * in between. What the device last heard (a) joins the new recording's
+     * first frames, which fade in from silence, and does not drop to zero. */
+    AudioFifoGate_Switch(&gate, 0);
+    AudioFifo_Reset(&fifo);
+    memset(&gate, 0, sizeof(gate));
+    AudioFifoGate_Switch(&gate, 1);
+    for (i = 0; i < 3000; i++) frames[i * 2] = (int16_t)a_left, frames[i * 2 + 1] = (int16_t)a_right;
+    AudioFifo_Push(&fifo, frames, 3000);
+    fade_pop(out, 300, 300); /* from silence: the fade in, over */
+    fade_expect(out, 299, a_left, a_right, "before the off and on");
+    AudioFifoGate_Switch(&gate, 0);
+    AudioFifo_Reset(&fifo);
+    AudioFifoGate_Switch(&gate, 1); /* no call of the device between the two */
+    for (i = 0; i < AUDIO_FIFO_PRIME; i++) frames[i * 2] = (int16_t)q, frames[i * 2 + 1] = (int16_t)q_r;
+    AudioFifo_Push(&fifo, frames, AUDIO_FIFO_PRIME);
+    fade_pop(out, 200, 50);
+    for (i = 0; i < 200; i++) {
+        unsigned k = i < fade ? i + 1 : fade;
+        int faded_l = q * (int)k / (int)fade, faded_r = q_r * (int)k / (int)fade;
+        fade_expect(out, i, join_at(a_left, faded_l, k), join_at(a_right, faded_r, k), "off and on between two calls");
+    }
+    join_smooth(out, 200, a_left, a_right, (a_left - 2 * q) / (int)fade + 4, "off and on between two calls");
     AudioFifoGate_Switch(&gate, 0);
     AudioFifo_Reset(&fifo);
     own_left = own_right = 0;
     if (!fade_failed) {
-        printf("audio_fifo_test: switch on (empty and primed), switch off and a skip are crossfaded over %u frames\n",
-               AUDIO_FIFO_FADE);
+        printf("audio_fifo_test: switch on (empty and primed), switch off, a skip and an off and on between two calls "
+               "are crossfaded over %u frames\n", AUDIO_FIFO_FADE);
     }
     return fade_failed;
 }

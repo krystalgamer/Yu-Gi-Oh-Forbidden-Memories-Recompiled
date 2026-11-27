@@ -227,7 +227,10 @@ static inline uint64_t AudioFifo_PaceGrid(uint64_t *next, uint64_t now, uint64_t
  * no call that began before it is still running: after a switch off, the
  * FIFO is nobody's and may be reset; after a switch on, the thread's own
  * mixer is not running any more and the game thread may take it over. A
- * call that begins after the flip sees it (sequentially consistent).
+ * call that begins after the flip sees it (sequentially consistent). Every
+ * switch also counts: two flips between one call and the next (a recording
+ * stopped and another started at once) leave `on` as it was, but the FIFO was
+ * reset in between, and the call sees from the count that it was handed over.
  *
  * The device hears the hand-over as a crossfade over AUDIO_FIFO_FADE frames,
  * from the last frame it was given by one side to the first ones of the
@@ -236,9 +239,12 @@ static inline uint64_t AudioFifo_PaceGrid(uint64_t *next, uint64_t now, uint64_t
  * The fields below are the calling thread's alone, apart from `on` and
  * `in_call`, so the gate's ordering is the one above. */
 typedef struct {
-    int on;             /* atomic: calls play the FIFO */
+    uint32_t state;     /* atomic: bit 0, calls play the FIFO; the rest counts the switches, so that
+                         * one word says both and a call cannot take the flip from one and the count
+                         * from another */
     int in_call;        /* atomic: a thread is inside AudioFifoGate_Call */
     int fifo_played;    /* calling thread only: the last call played the FIFO */
+    uint32_t seen;      /* calling thread only: the switch count of the last call */
     int16_t heard[2];   /* calling thread only: the last frame given to the device */
     int16_t from[2];    /* calling thread only: the frame the hand-over crossfade starts from */
     uint32_t join_left; /* calling thread only: frames of that crossfade still to do */
@@ -247,16 +253,21 @@ typedef struct {
 static inline void AudioFifoGate_Call(AudioFifoGate *gate, AudioFifo *fifo, int16_t *out, size_t count,
                                       void (*own_mix)(int16_t *, size_t))
 {
+    uint32_t state, switches;
     int fifo_on;
     __atomic_store_n(&gate->in_call, 1, __ATOMIC_SEQ_CST);
-    fifo_on = __atomic_load_n(&gate->on, __ATOMIC_SEQ_CST);
+    state = __atomic_load_n(&gate->state, __ATOMIC_SEQ_CST);
+    fifo_on = (int)(state & 1u);
+    switches = state >> 1;
     if (fifo_on) AudioFifo_Fade(fifo, out, AudioFifo_Pop(fifo, out, count), count);
     else own_mix(out, count);
-    /* A flip since the last call starts the crossfade from the last frame
-     * this thread gave (from silence there is nothing to join). It touches
-     * the gate's own fields only, and the call is still inside the gate. */
-    if (fifo_on != gate->fifo_played) {
+    /* A flip since the last call, or a switch that flipped back (the FIFO
+     * was reset between), starts the crossfade from the last frame this
+     * thread gave (from silence there is nothing to join). It touches the
+     * gate's own fields only, and the call is still inside the gate. */
+    if (fifo_on != gate->fifo_played || switches != gate->seen) {
         gate->fifo_played = fifo_on;
+        gate->seen = switches;
         gate->from[0] = gate->heard[0];
         gate->from[1] = gate->heard[1];
         /* Only a hand-over to the FIFO from silence needs none (its own fade
@@ -274,7 +285,11 @@ static inline void AudioFifoGate_Call(AudioFifoGate *gate, AudioFifo *fifo, int1
 static inline void AudioFifoGate_Switch(AudioFifoGate *gate, int on)
 {
     struct timespec nap = {0, 200000};
-    __atomic_store_n(&gate->on, on != 0, __ATOMIC_SEQ_CST);
+    uint32_t old = __atomic_load_n(&gate->state, __ATOMIC_SEQ_CST);
+    /* The count up by one and the flip, in one store. */
+    while (!__atomic_compare_exchange_n(&gate->state, &old, (((old >> 1) + 1u) << 1) | (on != 0), 0,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+    }
     while (__atomic_load_n(&gate->in_call, __ATOMIC_SEQ_CST)) nanosleep(&nap, NULL);
 }
 #endif
