@@ -37,6 +37,7 @@ static volatile unsigned pointer_buttons;
 static ControlLines lines;
 static char line[CONTROL_LINE_MAX + 1];
 static int line_held;     /* `line` is a command that waits for the game to run again (serve_paused) */
+static int long_owed;     /* "line too long" errors owed behind a step or a load still in flight (serve_paused) */
 static uint8_t data[CONTROL_DATA_MAX];
 static char reply[2 * CONTROL_DATA_MAX + 64];
 
@@ -112,7 +113,7 @@ static void attach(void)
 static void detach(const char *why)
 {
     ControlNet_Drop();
-    attached = running = owed = line_held = 0;
+    attached = running = owed = line_held = long_owed = 0;
     send_failed = pad2_set = 0;
     lines.used = lines.dropping = 0;
     pads[0] = pads[1] = 0; /* nothing held by a client that has gone */
@@ -507,6 +508,10 @@ static int handle(char *text)
          * or a client that pipelined them would read that "ok" as the
          * step's. */
         if (running || owed) send_error("the game quit before that command finished");
+        while (long_owed) { /* the over-long lines that came before the quit */
+            long_owed--;
+            send_error("line too long");
+        }
         send_line("ok");
         detach("the client asked to quit");
         Platform_RequestQuit(); /* VSync's own way out, right after this */
@@ -525,6 +530,11 @@ static int next_line(void)
         long count;
         int got;
         if (send_failed) return -1;
+        while (long_owed) { /* what serve_paused saw behind a step in flight, whose reply is out by now */
+            long_owed--;
+            send_error("line too long");
+            if (send_failed) return -1;
+        }
         if (line_held) { /* the command serve_paused left: first, as it came */
             line_held = 0;
             return 1;
@@ -612,7 +622,11 @@ void Control_Point(void)
  *    has no reply yet, so only `quit` is answered meanwhile, and it ends the
  *    step: the step's reply is an "err" (the game quit before it finished),
  *    then the quit's "ok" (handle), so the replies stay one per command, in
- *    order.
+ *    order. A line over the size limit is a command too: seen behind a step in
+ *    flight, its "err line too long" is owed (long_owed) and goes out after the
+ *    step's reply, before whatever follows (handle's quit, or next_line when
+ *    the game runs), as Control_Point, which reads nothing during a step,
+ *    has always answered it.
  *  - A client that waits is still watched: while a command is held, what the
  *    client sends goes into the line buffer unparsed (it is read when the game
  *    runs, after the held command), so that a client that closes is seen at
@@ -625,9 +639,11 @@ void Control_Point(void)
  *    VBlank, whoever is attached: that VBlank and its Control_Point run as
  *    they do without this. Nothing here runs the clock, a VBlank handler or
  *    guest code, so the stepped game is the one it was without a client.
- *    The pause is the player's only until that Control_Point: after a frame
- *    step the game has run, and an attached client runs it as usual from
- *    there (what waited is served, then its steps and the rest).
+ *    The pause is the player's until that Control_Point: after a frame step
+ *    the game has run one frame, and what waited is served there, in order.
+ *    A client's own `step N` taken there still needs N VBlanks, and the pause
+ *    brings none (rate 0 on the real clock): the player's pause wins, and the
+ *    step waits until they end it (or is answered with an err on a quit).
  * Reentrancy: the reply's idle callback pumps the window, never a wait. */
 static int answerable_paused(const char *text)
 {
@@ -695,7 +711,13 @@ static void serve_paused(void)
         }
         got = ControlLines_Next(&lines, line);
         if (got < 0) {
-            send_error("line too long");
+            /* A reply per command, in order: with a step or a load in flight
+             * its reply comes first, as Control_Point (which reads nothing
+             * while a step runs) would have it, so the error is owed until
+             * the game runs (next_line) or the quit that cuts that step short
+             * (handle). Reading goes on: a quit behind it still ends the pause. */
+            if (running || owed) long_owed++;
+            else send_error("line too long");
             continue;
         }
         if (got > 0) {

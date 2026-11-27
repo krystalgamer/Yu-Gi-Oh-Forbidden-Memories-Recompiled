@@ -22,10 +22,14 @@ taken by the pause's wait:
      says "not gone" while unread bytes wait).
   6. `quit` is answered, and the game ends with exit code 0.
 
-Three more games:
+Four more games:
   - A client attached before the pause, with a step in flight: its `quit`
     gets the step's reply first (an "err"), then its own "ok", and the game
-    ends with exit code 0.
+    ends with exit code 0. The client is attached, and its step taken, at a
+    Control_Point well before the pause (an `info` answered at a frame far
+    below it; a game that was paused first is run again, not trusted).
+  - The same with a line over the size limit between the step and the quit:
+    the replies are the step's err, "err line too long", then the quit's ok.
   - MEMORIES_CRASH_TEST=pausewait@60 pauses inside VSync(1000), not VSync(0)'s
     own wait: `info` is answered and `quit` ends the game with exit code 0 (it
     used to spin at full speed, never reaching VSync's exit).
@@ -57,6 +61,7 @@ import yfm_control  # noqa: E402
 SKIP = 77
 EXE = Path(os.environ.get("YFM_EXECUTABLE") or yfm_control.EXECUTABLE)
 DISC = os.environ.get("MEMORIES_DISC", "")
+LINE_MAX = 65536   # CONTROL_LINE_MAX (control_protocol.h)
 SETTINGS = "mod.3d-monsters=0\nmod.hand-camera=0\n"
 
 
@@ -147,7 +152,13 @@ class Game:
         deadline = time.monotonic() + 10
         while True:
             client = self.connect()
-            answer = client.ask("info")
+            try:
+                answer = client.ask("info")
+            except OSError:
+                # RefuseOthers closed a socket with an unread `info`: the
+                # client may be reset (ConnectionResetError, BrokenPipeError,
+                # ...) instead of told "err busy": the same thing.
+                answer = "err busy"
             if not answer.startswith("err busy"):
                 return client, answer
             assert time.monotonic() < deadline, "the client that left was never dropped"
@@ -210,23 +221,46 @@ def paused_game() -> tuple[int, int]:
         game.close()
 
 
-def step_in_flight() -> None:
+def step_in_flight(long_line: bool = False) -> None:
     """A client attached before the pause, with a step in flight: its quit is
-    answered with the step's reply (an "err") first, then its own "ok"."""
-    game = Game("pause", frame=300)   # time for the client to attach and its step to be taken, whatever the load
-    try:
-        game.wait_for("control: listening on", "listened")
-        client = game.connect()
-        client.send("step 100000")   # taken at the next VSync(0): far past frame 300
-        game.wait_paused()
-        assert client.reply(1.0) is None, "a step in flight was answered while the game is paused"
-        client.send("quit")
-        first, second = client.reply(), client.reply()
-        assert first is not None and first.startswith("err"), f"the step's reply is an err first: {first!r}"
-        assert second == "ok", f"the quit's own ok comes second: {second!r}"
-        game.end()
-    finally:
-        game.close()
+    answered with the step's reply (an "err") first, then its own "ok". With
+    `long_line` a line over the limit sits between the step and the quit, and
+    its "err line too long" comes after the step's err, before the "ok" (one
+    reply per command, in order)."""
+    frame = 300
+    for attempt in range(3):
+        game = Game("pause", frame=frame)
+        try:
+            game.wait_for("control: listening on", "listened")
+            client = game.connect()
+            # An answer from Control_Point, while the game runs: the client is
+            # attached and the game holds there for its next line, so the
+            # step is taken at that point, far below the pause. A pause that
+            # came first (a very slow start) answers this `info` from the
+            # pause's wait: the game is run again.
+            at, _ = where(client.ask("info"))
+            if at > frame - 100:
+                print(f"control_paused_test: step_in_flight: attached at frame {at}, too near the pause at {frame}; "
+                      f"again ({attempt + 1}/3)")
+                continue
+            client.send("step 100000")   # taken now, at that Control_Point: far past frame 300
+            if long_line:
+                client.send("x" * (LINE_MAX + 4096))
+            game.wait_paused()
+            assert client.reply(1.0) is None, "a step in flight was answered while the game is paused"
+            client.send("quit")
+            expected = ["err", "err line too long", "ok"] if long_line else ["err", "ok"]
+            got = [client.reply() for _ in expected]
+            assert got[0] is not None and got[0].startswith("err"), f"the step's reply is an err first: {got!r}"
+            if long_line:
+                assert got[1] == "err line too long", f"the over-long line is answered, in its turn: {got!r}"
+            assert got[-1] == "ok", f"the quit's own ok comes last: {got!r}"
+            game.end()
+            return
+        finally:
+            game.close()
+    raise AssertionError("the game was paused before a client could be attached, three times: the machine is too slow "
+                         f"for a pause at frame {frame}")
 
 
 def quit_outside_vsync0() -> None:
@@ -270,10 +304,11 @@ def main() -> int:
         return SKIP
     frame, _ = paused_game()
     step_in_flight()
+    step_in_flight(long_line=True)
     quit_outside_vsync0()
     quit_while_polling()
     print(f"control_paused_test: a paused game answered info, step 0 and peek at frame {frame}, held a step, "
-          "dropped a client that left behind it, answered a step in flight with an err before the quit's ok, and "
+          "dropped a client that left behind it, answered a step in flight (also with an over-long line behind it) with an err before the quit's ok, and "
           "quit ended it, also from a wait outside VSync(0) and from a poll of VSync(-1)")
     return 0
 

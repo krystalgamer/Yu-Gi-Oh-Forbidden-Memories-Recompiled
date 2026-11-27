@@ -212,15 +212,19 @@ build with the old combination; the eight smoke cases unchanged.
   commands' order; a client attached before the pause, with a step in
   flight, is answered `quit` only, and that ends the step: the step's
   reply comes first, as `err the game quit before that command finished`,
-  then the quit's `ok` (one reply per command, in order). While a command
+  then the quit's `ok` (one reply per command, in order); a line over the
+  size limit behind that step is a command too, its `err line too long`
+  goes out after the step's reply and before the quit's `ok`. While a command
   waits, what the client sends goes on being read (unparsed, into the line
   buffer, served when the game runs), so a client that closes is dropped at
   once and the next one is taken, whatever it had sent behind the waiting
   command; only a full buffer falls back to peeking one byte. The pause is
-  the player's only until the next `Control_Point`: attaching does not end it
-  and a frame step ends the wait for one VBlank as it does without a client,
-  but after that step the game has run, and the attached client runs it as
-  usual from there (what waited is served, then its steps and the rest).
+  the player's until the next `Control_Point`: attaching does not end it and
+  a frame step ends the wait for one VBlank as it does without a client; what
+  waited is served at that `Control_Point`, in order. The player's pause
+  wins there too: at rate 0 on the real clock a client's `step N` taken at
+  that point still needs N VBlanks and the pause brings none, so it waits
+  until the player ends the pause (or is answered with an err on a quit).
   Checked headless on the real clock (`MEMORIES_CRASH_TEST=pause@60`, CTest
   `pc_control_paused`); the window's pause loop in `pace()` runs the same
   function and is not run by that test.

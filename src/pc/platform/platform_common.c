@@ -853,7 +853,8 @@ static void pace(void)
  * clock, the VBlank count and what the guest reads are those of every other
  * rate, and the pause already froze time. Not under the virtual clock, whose
  * polls reach pace() and its loop (serving twice would nap twice); not from a
- * poll inside the game's own interrupt code (servicing), where the hook's
+ * poll inside the game's own interrupt code (servicing under the cooperative
+ * clock, ticking under the interrupt clock's tick handler), where the hook's
  * reads would meet the guest in the middle of a handler. A quit is left to
  * the caller (vsync: LibEtc_ExitIfQuit, which ends the process). */
 static void serve_paused_poll(void)
@@ -861,7 +862,7 @@ static void serve_paused_poll(void)
 #ifndef _WIN32
     struct timespec nap = {0, 500000};
 #endif
-    if (rate != 0 || servicing || Platform_ShouldQuit()) return;
+    if (rate != 0 || servicing || ticking || Platform_ShouldQuit()) return;
     Platform_PumpEvents();
     if (paused_serve) paused_serve();
     if (step_pending) return; /* the next poll's service() lets its VBlank through: no nap in its way */
