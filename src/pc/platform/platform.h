@@ -222,8 +222,13 @@ int Platform_ScriptedPad2(void);
  *    the backend presents without blocking and the cap alone limits presents.
  */
 int Platform_StartTimers(void (*tick)(uint64_t game_us, uint64_t real_us), void (*vblank)(void));
-/* Wait while the VBlank count still equals `count` (the caller's count at entry). */
+/* Wait while the VBlank count still equals `count` (the caller's count at entry).
+ * Once Platform_ShouldQuit is set it returns at once and brings no VBlank: a
+ * loop that waits for the count to move calls LibEtc_ExitIfQuit after it. */
 void Platform_WaitVBlank(unsigned count);
+/* The shutdown a quit ends in (timers, the mods' hooks, exit(0)); returns
+ * when no quit was asked. VSync's, and every wait loop's way out of one. */
+void LibEtc_ExitIfQuit(void);
 /* No more ticks or VBlanks: called before the game exits, so that none
  * interrupts the C runtime while it shuts down. */
 void Platform_StopTimers(void);
@@ -309,7 +314,7 @@ void Platform_ControlIdle(void);
  * clock's pause loop in pace(), and a wait for a VBlank that cannot come),
  * after the window's events were pumped. It runs between two VBlanks, at no
  * state point, and must neither advance the clock nor change what the guest
- * sees (control.c, Control_Paused, says what it does). NULL: none. */
+ * sees (control.c, serve_paused, says what it does). NULL: none. */
 void Platform_OnPaused(void (*serve)(void));
 /* The virtual clock runs (MEMORIES_DETERMINISTIC=1, or the frame-dump
  * combination): what a recording needs to be played back. */

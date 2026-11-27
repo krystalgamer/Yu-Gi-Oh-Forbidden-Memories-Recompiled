@@ -16,11 +16,22 @@ taken by the pause's wait:
   3. `step 1` is not answered: it needs the game to run, so it waits.
   4. The client closes; a second takes its place at once; the game still
      stands at the same frame (the step that waited did not run).
-  5. `quit` is answered, and the game ends with exit code 0.
+  5. A client sends `step 1` (held), then `quit` in a later segment (held
+     behind the step), then closes: it is dropped all the same, and the next
+     client is answered (reading stops at a held line, and a one-byte peek
+     says "not gone" while unread bytes wait).
+  6. `quit` is answered, and the game ends with exit code 0.
+
+Two more games:
+  - A client attached before the pause, with a step in flight: its `quit`
+    gets the step's reply first (an "err"), then its own "ok", and the game
+    ends with exit code 0.
+  - MEMORIES_CRASH_TEST=pausewait@60 pauses inside VSync(1000), not VSync(0)'s
+    own wait: `info` is answered and `quit` ends the game with exit code 0 (it
+    used to spin at full speed, never reaching VSync's exit).
 
 What this does not cover: a window's pause (the pause loop of pace(), which
-a headless game never runs), a frame step, a client attached before the
-pause (its step in flight is answered first)."""
+a headless game never runs), a frame step."""
 from __future__ import annotations
 
 import os
@@ -79,35 +90,81 @@ def where(reply: str) -> tuple[int, int]:
     return int(fields[fields.index("frame") + 1]), int(fields[fields.index("vblank") + 1])
 
 
-def main() -> int:
-    if not EXE.is_file() or not DISC or not Path(DISC).is_file():
-        print("control_paused_test: skipped: no game or no disc")
-        return SKIP
-    work = Path(tempfile.mkdtemp(prefix="control-paused-"))
-    settings = work / "settings.txt"
-    settings.write_text(SETTINGS, encoding="utf-8")
-    (work / "user").mkdir()
-    port = yfm_control.free_port()
-    env = {key: value for key, value in os.environ.items() if not key.startswith("MEMORIES_")}
-    env.update(MEMORIES_DISC=DISC, MEMORIES_HEADLESS="1", MEMORIES_NO_AUDIO="1", SDL_AUDIODRIVER="dummy",
-               MEMORIES_NO_GAMEPAD="1", MEMORIES_NO_UPDATE_CHECK="1", MEMORIES_WATCHDOG="0",
-               MEMORIES_SHOW_HUD="0", MEMORIES_USER_DIR=str(work / "user"), MEMORIES_SETTINGS=str(settings),
-               MEMORIES_CONTROL=str(port), MEMORIES_CONTROL_WAIT="0", MEMORIES_CRASH_TEST="pause@60")
-    command, wine = yfm_control.launcher(EXE)
-    log_path = work / "game.log"
-    with log_path.open("wb") as log:
-        game = subprocess.Popen(command, cwd=ROOT, env={**env, **wine}, stdout=log, stderr=subprocess.STDOUT)
-    clients: list[Client] = []
-    try:
+class Game:
+    """One headless game on the real clock with the control channel up and no
+    wait for a first client, paused by MEMORIES_CRASH_TEST=`crash`@60."""
+
+    def __init__(self, crash: str):
+        self.crash = crash
+        self.work = Path(tempfile.mkdtemp(prefix="control-paused-"))
+        settings = self.work / "settings.txt"
+        settings.write_text(SETTINGS, encoding="utf-8")
+        (self.work / "user").mkdir()
+        self.port = yfm_control.free_port()
+        env = {key: value for key, value in os.environ.items() if not key.startswith("MEMORIES_")}
+        env.update(MEMORIES_DISC=DISC, MEMORIES_HEADLESS="1", MEMORIES_NO_AUDIO="1", SDL_AUDIODRIVER="dummy",
+                   MEMORIES_NO_GAMEPAD="1", MEMORIES_NO_UPDATE_CHECK="1", MEMORIES_WATCHDOG="0",
+                   MEMORIES_SHOW_HUD="0", MEMORIES_USER_DIR=str(self.work / "user"), MEMORIES_SETTINGS=str(settings),
+                   MEMORIES_CONTROL=str(self.port), MEMORIES_CONTROL_WAIT="0", MEMORIES_CRASH_TEST=f"{crash}@60")
+        command, wine = yfm_control.launcher(EXE)
+        self.log_path = self.work / "game.log"
+        with self.log_path.open("wb") as log:
+            self.process = subprocess.Popen(command, cwd=ROOT, env={**env, **wine}, stdout=log,
+                                            stderr=subprocess.STDOUT)
+        self.clients: list[Client] = []
+
+    def log(self) -> str:
+        return self.log_path.read_text(encoding="utf-8", errors="replace")
+
+    def connect(self) -> Client:
+        client = Client(self.port)
+        self.clients.append(client)
+        return client
+
+    def wait_for(self, text: str, what: str) -> None:
         deadline = time.monotonic() + 120
-        while "crash test: pause now" not in log_path.read_text(encoding="utf-8", errors="replace"):
-            assert game.poll() is None, f"the game ended with {game.returncode} before it paused; see {log_path}"
-            assert time.monotonic() < deadline, f"the game never paused; see {log_path}"
+        while text not in self.log():
+            assert self.process.poll() is None, f"the game ended with {self.process.returncode} {what}; see {self.log_path}"
+            assert time.monotonic() < deadline, f"the game never {what}; see {self.log_path}"
             time.sleep(0.1)
+
+    def wait_paused(self) -> None:
+        self.wait_for(f"crash test: {self.crash} now", "paused")
         time.sleep(0.5)   # in the pause's wait by now
 
-        client = Client(port)
-        clients.append(client)
+    def replacement(self) -> tuple[Client, str]:
+        """A new client, once the one that left has been dropped: the first
+        `info` it is answered (an "err busy" means the game still holds the
+        old one)."""
+        deadline = time.monotonic() + 10
+        while True:
+            client = self.connect()
+            answer = client.ask("info")
+            if not answer.startswith("err busy"):
+                return client, answer
+            assert time.monotonic() < deadline, "the client that left was never dropped"
+            client.close()
+            time.sleep(0.2)
+
+    def end(self, expect_code: int = 0) -> None:
+        code = self.process.wait(timeout=60)
+        assert code == expect_code, f"the game ended with {code}; see {self.log_path}"
+
+    def close(self) -> None:
+        for client in self.clients:
+            client.close()
+        if self.process.poll() is None:
+            self.process.kill()
+            self.process.wait()
+
+
+def paused_game() -> tuple[int, int]:
+    """A client that comes after the pause: what it is answered, a client that
+    leaves with commands unread, then quit. Returns where the game stood."""
+    game = Game("pause")
+    try:
+        game.wait_paused()
+        client = game.connect()
         frame, vblank = where(client.ask("info"))
         assert frame >= 60, frame
         assert where(client.ask("step 0")) == (frame, vblank)
@@ -123,31 +180,71 @@ def main() -> int:
 
         # A client that left is replaced at once, and the step it left
         # waiting did not run.
-        client = Client(port)
-        clients.append(client)
-        deadline = time.monotonic() + 10
-        while True:
-            answer = client.ask("info")
-            if not answer.startswith("err busy"):
-                break
-            assert time.monotonic() < deadline, "the first client was never dropped"
-            client.close()
-            time.sleep(0.2)
-            client = Client(port)
-            clients.append(client)
+        client, answer = game.replacement()
         assert where(answer) == (frame, vblank), "the step that waited ran"
 
+        # A client that sends a step (held), then a quit in a later segment
+        # (held behind it), then closes: the game reads on while it holds the
+        # step, so it sees the close, drops the client and takes the next.
+        client.send("step 1")
+        time.sleep(0.3)
+        client.send("quit")
+        time.sleep(0.3)
+        client.close()
+        client, answer = game.replacement()
+        assert where(answer) == (frame, vblank), "the step or the quit that waited ran"
+        assert game.process.poll() is None, "the quit of a client that had left ended the game"
+
         assert client.ask("quit") == "ok"
-        code = game.wait(timeout=60)
-        assert code == 0, f"the game ended with {code}; see {log_path}"
+        game.end()
+        return frame, vblank
     finally:
-        for client in clients:
-            client.close()
-        if game.poll() is None:
-            game.kill()
-            game.wait()
+        game.close()
+
+
+def step_in_flight() -> None:
+    """A client attached before the pause, with a step in flight: its quit is
+    answered with the step's reply (an "err") first, then its own "ok"."""
+    game = Game("pause")
+    try:
+        game.wait_for("control: listening on", "listened")
+        client = game.connect()
+        client.send("step 100000")   # taken at the next VSync(0): far past frame 60
+        game.wait_paused()
+        assert client.reply(1.0) is None, "a step in flight was answered while the game is paused"
+        client.send("quit")
+        first, second = client.reply(), client.reply()
+        assert first is not None and first.startswith("err"), f"the step's reply is an err first: {first!r}"
+        assert second == "ok", f"the quit's own ok comes second: {second!r}"
+        game.end()
+    finally:
+        game.close()
+
+
+def quit_outside_vsync0() -> None:
+    """A pause inside VSync(1000), not VSync(0)'s own wait: info is answered
+    and quit ends the game with 0 (it spun for ever)."""
+    game = Game("pausewait")
+    try:
+        game.wait_paused()
+        client = game.connect()
+        assert client.ask("info").startswith("ok frame "), "info while the game waits in VSync(1000)"
+        assert client.ask("quit") == "ok"
+        game.end()
+    finally:
+        game.close()
+
+
+def main() -> int:
+    if not EXE.is_file() or not DISC or not Path(DISC).is_file():
+        print("control_paused_test: skipped: no game or no disc")
+        return SKIP
+    frame, _ = paused_game()
+    step_in_flight()
+    quit_outside_vsync0()
     print(f"control_paused_test: a paused game answered info, step 0 and peek at frame {frame}, held a step, "
-          "and quit ended it")
+          "dropped a client that left behind it, answered a step in flight with an err before the quit's ok, and "
+          "quit ended it, also from a wait outside VSync(0)")
     return 0
 
 

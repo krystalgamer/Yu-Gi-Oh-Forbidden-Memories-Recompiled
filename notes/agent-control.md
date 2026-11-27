@@ -210,12 +210,27 @@ build with the old combination; the eight smoke cases unchanged.
   `shot`, `hash`, `record`...) waits queued until the game runs again, and
   the first of them holds back the ones behind it, so replies stay in the
   commands' order; a client attached before the pause, with a step in
-  flight, is answered `quit` only (its step's reply comes first). The pause
-  is still the player's: attaching does not end it, and a frame step ends
-  the wait for one VBlank as it does without a client. Checked headless on
-  the real clock (`MEMORIES_CRASH_TEST=pause@60`, CTest `pc_control_paused`);
-  the window's pause loop in `pace()` runs the same function and is not run
-  by that test.
+  flight, is answered `quit` only, and that ends the step: the step's
+  reply comes first, as `err the game quit before that command finished`,
+  then the quit's `ok` (one reply per command, in order). While a command
+  waits, what the client sends goes on being read (unparsed, into the line
+  buffer, served when the game runs), so a client that closes is dropped at
+  once and the next one is taken, whatever it had sent behind the waiting
+  command; only a full buffer falls back to peeking one byte. The pause is
+  the player's only until the next `Control_Point`: attaching does not end it
+  and a frame step ends the wait for one VBlank as it does without a client,
+  but after that step the game has run, and the attached client runs it as
+  usual from there (what waited is served, then its steps and the rest).
+  Checked headless on the real clock (`MEMORIES_CRASH_TEST=pause@60`, CTest
+  `pc_control_paused`); the window's pause loop in `pace()` runs the same
+  function and is not run by that test.
+- **A quit while the game waits outside `VSync(0)`:** the wait ends at once and
+  brings no VBlank, so a loop that waits for the count to move spun at full
+  speed and never reached `VSync`'s exit (`VSync(n)`, `MemCardSync`,
+  `Graphics_SyncFrame`; it came with closing the window too). They now end
+  through `LibEtc_ExitIfQuit`, the shutdown `VSync` always did (timers, then
+  the mods' hooks). Checked by `MEMORIES_CRASH_TEST=pausewait@60` (CTest
+  `pc_control_paused` too).
 - **Cost:** with `MEMORIES_CONTROL` unset, `Control_Point` returns at its
   first test and the pads it adds are 0. The eight smoke cases pass, and
   7000 frame hashes of a run without it equal the origin/master build's.

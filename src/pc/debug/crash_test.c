@@ -21,6 +21,8 @@
  *   pause     the clock stops, as the player's pause does (rate 0), and
  *             the game waits there: tests/pc/control_paused_test.py checks
  *             that a control client is still answered
+ *   pausewait the same, inside a wait that is not VSync(0)'s own (VSync(1000)):
+ *             a `quit` must still end the game, not leave it spinning
  *   restart   the game restarts itself (the mods window's restart), and
  *             the game after it stops as "fatal" does: the monitor follows
  *             a restart
@@ -46,6 +48,7 @@
 
 unsigned Memories_PresentedFrames(void);
 void Platform_SetClockRate(int percent);
+int Memories_VSync(int mode);
 int Platform_RestartGame(void); /* platform.h brings types that clash with <windows.h> */
 
 volatile int CrashTest_TickHang;
@@ -159,6 +162,9 @@ void CrashTest_Frame(void)
         }
     } else if (!strcmp(kind, "pause")) {
         Platform_SetClockRate(0);
+    } else if (!strcmp(kind, "pausewait")) {
+        Platform_SetClockRate(0);
+        Memories_VSync(1000); /* waits for a thousand VBlanks that a pause does not bring */
     } else if (!strcmp(kind, "present")) {
         in_present = 1;
     } else if (!strcmp(kind, "null")) {

@@ -817,7 +817,7 @@ static void pace(void)
         if (paused_serve) paused_serve();
 #ifdef _WIN32
         Win32_Heartbeat(); /* paused, not hung */
-        Win32_Sleep(500);
+        Win32_Sleep(500); /* microseconds: a client waits half a millisecond at most */
 #else
         nanosleep(&nap, NULL);
 #endif

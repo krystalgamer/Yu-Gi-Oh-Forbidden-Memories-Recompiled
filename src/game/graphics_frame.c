@@ -53,7 +53,9 @@ void Graphics_SyncFrame(void)
          * same VBlanks in the same order. */
         extern void Platform_WaitVBlank(unsigned count);
         extern unsigned Platform_VBlankCount(void);
+        extern void LibEtc_ExitIfQuit(void);
         Platform_WaitVBlank(Platform_VBlankCount());
+        LibEtc_ExitIfQuit(); /* a quit brings no VBlank: this would spin */
 #endif
     }
 
