@@ -527,9 +527,10 @@ at 0 during the title has near-zero RMS.
 ### Task 3.3: audio health stats
 
 Expose from `sdl.c` for the HUD: `SDL_GetAudioStreamQueued(stream)` in
-frames, and count underruns (`feed` asked for more than the mixer could
-deliver is not possible here, so count when queued drops to 0 at entry to
-`feed`). Add `Platform_AudioStats(int *queued_frames, unsigned *underruns)`
+frames, and count underruns. (First built as "queued is 0 at entry to
+`feed`"; `feed` puts exactly what SDL asks for, so that held at every
+callback and counted nothing real. It now counts late callbacks: a gap of
+more than twice the period since the last one.) Add `Platform_AudioStats(int *queued_frames, unsigned *underruns)`
 to `platform.h` (X11/ALSA: return zeros).
 
 ## 7. Phase 4: debug foundations

@@ -25,6 +25,7 @@
 #include "loading.h"
 #include "settings.h"
 #include "pc/audio/spu.h"
+#include "pc/audio/late_callback.h"
 #include "pc/debug/cheats.h"
 #include "pc/cards/cards.h"
 #include "pc/tower/tower.h"
@@ -1456,25 +1457,36 @@ int Gamepad_Connected(int p){return ControlsRuntime_Connected(p);}
 /* --- audio ------------------------------------------------------------ */
 
 static SDL_AudioStream *stream;
-static volatile unsigned audio_underruns;
+/* Late device callbacks (the HUD's "late callbacks"; late_callback.h says why
+ * not "the stream is empty at entry", which counted 15177 in 15178
+ * requests). A backend that prebuffers several periods can tolerate a longer
+ * gap without a dropout, so this errs on the high side there. */
+static SDL_AtomicInt audio_underruns; /* the audio thread adds, the HUD reads */
 
 static void SDLCALL feed(void *userdata, SDL_AudioStream *to, int additional, int total)
 {
     static int16_t buffer[256 * 2];
+    static uint64_t previous_ns;
+    static int previous_bytes; /* what the previous callback put: the time the gap since it should be */
+    uint64_t now_ns = SDL_GetTicksNS();
+    int put = 0;
     (void)userdata;
     (void)total;
-    if (SDL_GetAudioStreamQueued(to) == 0) audio_underruns++;
+    if (AudioLate_Is(previous_ns, now_ns, previous_bytes)) SDL_AddAtomicInt(&audio_underruns, 1);
+    previous_ns = now_ns;
     while (additional > 0) {
         Platform_ThreadMix(buffer, 256); /* the mix, or the stepped mixer's frames (platform.h) */
         SDL_PutAudioStreamData(to, buffer, (int)sizeof(buffer));
         additional -= (int)sizeof(buffer);
+        put += (int)sizeof(buffer);
     }
+    previous_bytes = put;
 }
 
 void Platform_AudioStats(int *queued_frames, unsigned *underruns)
 {
     if (queued_frames) *queued_frames = stream ? SDL_GetAudioStreamQueued(stream) / (int)(sizeof(int16_t) * 2) : 0;
-    if (underruns) *underruns = audio_underruns;
+    if (underruns) *underruns = (unsigned)SDL_GetAtomicInt(&audio_underruns);
 }
 
 int HERE(Platform_StartAudio)(void (*mix)(int16_t *, size_t))
