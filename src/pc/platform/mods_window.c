@@ -21,6 +21,7 @@
 #include "pc/mods/manifest_code.h"
 #include "pc/mods/mods.h"
 #include "pc/mods/overlap.h"
+#include "pc/debug/recorder.h"
 #include "paths.h"
 #include "platform.h"
 #include "settings.h"
@@ -3037,6 +3038,7 @@ static void apply(void)
         for (int j = 0; j < counts[i]; j++)
             Mods_OptionSet(i, j, values[i][j]);
     }
+    Recorder_HostAction("Turning a mod on or off");
     if (!Mods_Apply(wanted, status, sizeof(status))) {
         for (int i = 0; i < Mods_Count(); i++) {
             char key[160];

@@ -303,7 +303,7 @@ static int import_card(int index, const char *name)
 {
     static unsigned char card[CARD_SIZE], existing[SAVE_SLOT_FILE_SIZE];
     char path[1024], target[1024];
-    const char *named = getenv(index ? "MEMORIES_MEMCARD2" : "MEMORIES_MEMCARD1");
+    const char *named = Paths_ProgressDir() ? NULL : getenv(index ? "MEMORIES_MEMCARD2" : "MEMORIES_MEMCARD1");
     FILE *file;
     int block;
     long have = read_file(index, existing, NULL);

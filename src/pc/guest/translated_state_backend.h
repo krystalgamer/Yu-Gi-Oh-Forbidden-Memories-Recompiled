@@ -9,6 +9,7 @@ void Memories_NativeStateRequest(int what, int slot);
 int Memories_NativeStateSave(const char *path);
 int Memories_NativeStateLoad(const char *path, char *why, size_t size);
 int Memories_NativeStateStartupDone(void);
+int Memories_NativeStateStartupFailed(void);
 int Memories_NativeStateLastSlot(void);
 void Memories_NativeStateRemapRange(MemoriesState *state, uint32_t from, uint32_t to, uint32_t size);
 void Memories_NativeStateRelocateField(const char *tag, void *data, size_t size);

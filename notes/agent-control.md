@@ -117,6 +117,8 @@ build with the old combination; the eight smoke cases unchanged.
 | `pointer X Y [BTN]` / `pointer off` | put the mouse at picture coordinates (decimal, 320x240; widescreen x -53 to 372) holding BTN (hex: 1 left, 2 right, 4 middle) for `host->pointer`, until `pointer off` or the client leaves; the real mouse is ignored meanwhile. It makes no pad bits, so a mod that reads it drives itself |
 | `quit` | exit |
 | `jump TARGET [OPPONENT [DECK]]` | another screen, as Debug > Jump to goes there (step 6; added with it) |
+| `record PATH` / `record stop` | a player's recording from here, as Game > Record replay makes one (notes/replays.md): PATH a `.yfmreplay`, or a plain recording with its start state beside it; the `ok` comes at the next point, after the start state is loaded |
+| `record_boot PATH` | Game > Record replay from boot...: the game restarts and records PATH (a `.yfmreplay`, with no start state) from its first frame; the `ok` comes before the restart (a restart that works never returns, so no reply can wait for it): when it fails the request is taken back and the connection is closed, so the client sees EOF as it does after a working restart, and tells them apart by connecting again (only a game that did not restart answers); no client follows the new game (a restart drops `MEMORIES_CONTROL`), and the game, with the environment it had, ends the recording when it exits; refused while a recording or a play runs |
 
 **Landed** (`src/pc/debug/control.c`, `control_net.c`, `control_protocol.c`;
 `tools/pc/yfm_control.py` is the client, section 5):
@@ -283,9 +285,22 @@ replay can begin at a state.
   when the game exits.
 - **Start:** from boot the indices are the VBlank count; with
   `MEMORIES_LOAD_STATE` the recording starts at the first safe point after
-  the startup load (`Memories_StateStartupDone`), and so does a play.
+  the startup load (`Memories_StateStartupDone`), and so does a play. The
+  frames count from there too (a state does not carry the presented frame
+  count), and until then both give the game no pads.
+- **At run time** (the channel's `record`, Game > Record replay): the
+  recording starts at a `VSync(0)` from a start state taken there and loaded
+  at once, so that it begins as a play of it does, with only what the state
+  holds; `record stop` (and a restart, which skips atexit on Windows) writes
+  its `E`. That is the player's format (notes/replays.md): a `poke`, a
+  `jump`, a `load` or a host action ends it instead of being recorded. The
+  channel's `record_boot` (Game > Record replay from boot...) restarts the
+  game and records from boot instead, with no start state in the file.
 - **Play:** `MEMORIES_PLAY=path` gives the pads the file's bits (the live
-  ones are ignored) and ends the game at its `E`. A mod's `host->pad`
+  ones are ignored) and ends the game at its `E`; a player's `.yfmreplay`
+  in a window pauses there instead (notes/replays.md), unless
+  `MEMORIES_CONTROL` is set, so a client is never left waiting on a pause
+  that does not serve the channel. A mod's `host->pad`
   reads the played bits too (`Mods_PadSource`): it used to read the
   keyboard directly, so the hand camera's L1 was lost in a play. It now
   also sees a control client's bits, which it did not.
@@ -304,7 +319,11 @@ replay can begin at a state.
 - **The clock:** only a run on the virtual clock plays back. The file says
   which ran (`F clock: virtual` or `real`, at its first frame), the game
   warns on stderr when it records on the real-time one, `replay.py record`
-  warns too, and `play` refuses such a replay. On the real-time clock each
+  warns too, and `play` refuses such a replay. Recording or playing now
+  turns the virtual clock on by itself (`Platform_SetVirtualClock`, from the
+  VSync a recording starts at), with the stepped mixer feeding the sound
+  device (`Platform_SetSteppedAudio`, notes/replays.md), so `F clock: real`
+  only comes from older builds. On the real-time clock each
   VBlank and each tick comes when the host's time says, at whichever
   service point the game reaches then (a VSync, one turn of a VBlank wait,
   a DrawSync, a `VSync(-1)` poll), so the same pad bits meet the game at
@@ -321,7 +340,9 @@ replay can begin at a state.
   the live pad, as before. With `MEMORIES_CLOCK=interrupt` the buffer the
   VBlank fills is taken with the timer's signal held.
 - **For phase 2** (a player's report from normal play, which runs on the
-  real-time clock): two ways, the first the plan.
+  real-time clock): two ways, the first the plan. The first is what Game >
+  Record replay does from the VSync it starts at (notes/replays.md); the
+  pacer for a slow host is not built: a frame that overruns slows the game.
   1. Run players on the virtual clock: `MEMORIES_DETERMINISTIC` in a window
      is already paced to the game speed, and pause and frame step work. What
      it changes: a host too slow for a frame slows the game instead of

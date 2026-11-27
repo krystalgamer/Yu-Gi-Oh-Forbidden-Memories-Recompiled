@@ -30,6 +30,17 @@ const char *Paths_ProgramDir(void);
 /* Join a relative path onto a root, creating the directories above it in the
  * user root's case. Both return 0 on success, -1 if it would not fit. */
 int Paths_User(char *out, size_t size, const char *relative);
+/* The player's progress: the save slots (saves/), what they keep beside
+ * them by token (cards/, packs/, duelists/, decks/, tower/) and the memory
+ * card images (memcard1.mcd, memcard2.mcd). While a replay plays
+ * (src/pc/debug/replay_file.h) Paths_User puts these under `directory`, a
+ * scratch copy, so that nothing the replay saves reaches the player's own
+ * (NULL or "" ends it); the MEMORIES_MEMCARD1/2 names are not used then.
+ * Paths_ProgressName lists the names (NULL past the last). */
+int Paths_IsProgress(const char *relative);
+const char *Paths_ProgressName(int index);
+void Paths_SetProgressDir(const char *directory);
+const char *Paths_ProgressDir(void);
 int Paths_Program(char *out, size_t size, const char *relative);
 /* Create a directory and every directory above it. 0 on success. */
 int Paths_MakeDirs(const char *path);

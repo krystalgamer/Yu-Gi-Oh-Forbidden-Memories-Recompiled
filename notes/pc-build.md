@@ -519,7 +519,10 @@ and pause and frame step work, headless runs flat out; see
 `MEMORIES_RECORD=path` (the pad bits of every VBlank, a frame hash at
 every frame and, with `MEMORIES_RECORD_STATES=N`, a state every N VBlanks,
 as text; `src/pc/debug/recorder.h`), `MEMORIES_PLAY=path` (play such a
-file back instead of the live pads, ending the game at its end; replays
+file back instead of the live pads, ending the game at its end; a
+`.yfmreplay` is played as File > Play replay... plays it,
+[replays](replays.md); either turns the virtual clock and the stepped
+mixer on; replays
 are made and checked with `tools/pc/replay.py`, and `python3
 tools/pc/replay.py run` checks those in `tests/pc/replays/` before a PR,
 like `smoke.py`: a local gate, since CI has no disc),

@@ -497,6 +497,7 @@ void Memories_NativeStatePoint(unsigned frames)
     if (boundary()) Memories_StateProcess(&requests, frames, &actions);
 }
 int Memories_NativeStateStartupDone(void) { return requests.startup_done; }
+int Memories_NativeStateStartupFailed(void) { return requests.startup_failed; }
 int Memories_NativeStateLastSlot(void) { return last_slot; }
 void Memories_NativeStateRemapRange(MemoriesState *state, uint32_t from, uint32_t to, uint32_t size)
 {

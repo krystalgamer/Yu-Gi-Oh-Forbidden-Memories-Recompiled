@@ -10,7 +10,6 @@
 
 #define PERIOD 256 /* 5.8 ms: key-ons land on mix periods, so keep them well under a sequencer tick */
 
-static void (*mixer)(int16_t *, size_t);
 static snd_pcm_t *pcm;
 
 static void *run(void *unused)
@@ -19,7 +18,7 @@ static void *run(void *unused)
     (void)unused;
     for (;;) {
         snd_pcm_sframes_t written;
-        mixer(buffer, PERIOD);
+        Platform_ThreadMix(buffer, PERIOD); /* the mix, or the stepped mixer's frames (platform.h) */
         written = snd_pcm_writei(pcm, buffer, PERIOD);
         if (written < 0 && snd_pcm_recover(pcm, (int)written, 1) < 0) {
             fprintf(stderr, "memories-pc: audio output stopped: %s\n", snd_strerror((int)written));
@@ -46,7 +45,7 @@ int Platform_StartAudio(void (*mix)(int16_t *, size_t))
             silent = 1;
         }
     }
-    mixer = mix;
+    if (!silent) Platform_AudioThreadStarted(mix);
     /* The timer signal is the game's interrupt and must stay on the main thread. */
     sigfillset(&all);
     pthread_sigmask(SIG_BLOCK, &all, &previous);

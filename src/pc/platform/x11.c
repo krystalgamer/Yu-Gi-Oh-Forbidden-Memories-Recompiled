@@ -156,6 +156,14 @@ static volatile uint16_t wheel_now;
 int Platform_Scale(void) { return scale; }
 void Platform_ApplyDisplaySettings(void) {}
 int Platform_HasWindowModes(void) { return 0; }
+/* No file dialog here: File > Play replay... has nothing to offer. */
+void Platform_ChooseReplay(void) {}
+int Platform_ChosenReplay(char *path, size_t size, char *why, size_t why_size)
+{
+    (void)path, (void)size, (void)why, (void)why_size;
+    return 0;
+}
+
 void Platform_AudioStats(int *queued_frames, unsigned *underruns)
 {
     if (queued_frames) *queued_frames = 0;

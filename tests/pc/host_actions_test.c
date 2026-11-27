@@ -10,6 +10,7 @@
 #include "pc/saves/deck_menu.h"
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 static uint32_t presses, held;
 static int shift, settings[SET_COUNT], saved, applied, rate = 100, stepped, muted, slot = 1, state_what, state_slot,
@@ -43,6 +44,19 @@ void Memories_StateRequest(int what, int value)
     state_slot = value;
 }
 void DeckMenu_Request(void) { deck++; }
+/* The recorder (recorder.h): what Record replay and the actions a replay
+ * cannot hold ask of it. */
+static int recording, starts, stops;
+static const char *broke;
+int Recorder_Recording(void) { return recording; }
+int Recorder_PlayingReplay(void) { return 0; }
+void Recorder_RequestStart(void) { starts++; }
+int Recorder_Stop(void)
+{
+    stops++;
+    return 0;
+}
+void Recorder_HostAction(const char *what) { broke = what; }
 static int notices;
 static void (*notice_answer)(int, int *);
 void Menu_ShowNotice(const char *title, const char *text, const char *const *buttons, int count, int focus,
@@ -91,9 +105,9 @@ int main(void)
     settings[SET_CONFIRM_QUIT] = 0;
     run(CTRL_HOST_SLOT_3);
     run(CTRL_HOST_SAVE_STATE);
-    assert(slot == 3 && state_what == 1 && state_slot == 3);
+    assert(slot == 3 && state_what == 1 && state_slot == 3 && !broke);
     run(CTRL_HOST_LOAD_STATE);
-    assert(state_what == 2);
+    assert(state_what == 2 && broke && !strcmp(broke, "Load state"));
     run(CTRL_HOST_FULLSCREEN);
     assert(settings[SET_FULLSCREEN] && applied == 1);
     settings[SET_BORDERLESS] = 1;
@@ -126,7 +140,14 @@ int main(void)
     run(CTRL_HOST_HUD);
     assert(settings[SET_SHOW_HUD] == 0);
     run(CTRL_HOST_DECK_SLOTS);
-    assert(deck == 1);
+    assert(deck == 1 && broke && !strcmp(broke, "The deck slots"));
+    /* Record replay starts a recording, or stops the one running. */
+    run(CTRL_HOST_RECORD_REPLAY);
+    assert(starts == 1 && !stops);
+    recording = 1;
+    run(CTRL_HOST_RECORD_REPLAY);
+    assert(starts == 1 && stops == 1);
+    recording = 0;
     /* Hold actions follow the hold, not presses. */
     held = 1u << CTRL_HOST_TURBO;
     HostActions_Run(&quit);

@@ -12,6 +12,7 @@
 #include "pc/platform/menu.h"
 #include "pc/platform/settings.h"
 #include "pc/sdk/display.h"
+#include "pc/tower/tower.h"
 #include <png.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -419,6 +420,7 @@ static int handle(char *text)
     case CONTROL_LOAD:
         /* Does not return when the state loads: the game resumes in the
          * state's VSync caller and the "ok" goes out at the next point. */
+        Recorder_HostAction("A control client's load");
         owed = 1;
         Platform_ControlHold(0);
         if (Memories_StateLoadHere(command.path, error, sizeof(error)) == -2) {
@@ -442,6 +444,56 @@ static int handle(char *text)
         } else {
             Recorder_Command(kept);
             send_line("ok");
+        }
+        return 0;
+    case CONTROL_RECORD:
+        if (!command.path) {
+            if (Recorder_Stop()) send_error("not recording");
+            else send_line("ok");
+            return 0;
+        }
+        /* As a load: the start state is loaded at once, and the "ok" goes
+         * out at the next point. */
+        owed = 1;
+        Platform_ControlHold(0);
+        Recorder_Start(command.path, error, sizeof(error));
+        Platform_ControlHold(1);
+        owed = 0;
+        send_error(error);
+        return 0;
+    case CONTROL_RECORD_BOOT:
+        /* The game restarts and records from its first frame: no client
+         * follows, so the "ok" goes out before. A restart, so a tower's duel
+         * refuses it as it refuses a jump (the client is the one told). */
+        if (Tower_Guard(TOWER_GUARD_JUMP, 0, error, sizeof(error))) {
+            send_error(error);
+            return 0;
+        }
+        if (Recorder_BootRequest(command.path, error, sizeof(error))) {
+            send_error(error);
+            return 0;
+        }
+        /* A successful restart never returns (execv, TerminateProcess), so no
+         * reply can wait for its result: "err" before "ok" is out of reach,
+         * and an "err" after the "ok" would be taken for the reply to the
+         * client's next command. A restart that fails (Recorder_BootRestart
+         * has taken the request back) detaches the client instead: it sees
+         * EOF, as it does when the restart works, and finds out which by
+         * connecting again. A game that is still here still listens (the
+         * port was read at startup), and a game after a restart that worked
+         * does not: Platform_RestartGame drops MEMORIES_CONTROL (unless
+         * MEMORIES_RESTART_ENV names it again, as a scripted check may). A
+         * restart that failed has changed the environment too (before execv
+         * / CreateProcessW), so this game's MEMORIES_CONTROL may be gone
+         * while its listener is not; recorder.c's end-of-replay rule reads
+         * the variable, and is the one thing that then differs. Under the
+         * Windows monitor the game ends before the restart is tried, and the
+         * monitor takes the request back and tells the player if it fails. */
+        send_line("ok");
+        if (Recorder_BootRestart(error, sizeof(error))) {
+            fprintf(stderr, "memories-pc: control: record_boot: %s\n", error);
+            detach("record_boot could not restart the game");
+            return 1; /* as quit: the client is gone, so the game runs on */
         }
         return 0;
     case CONTROL_QUIT:

@@ -1041,6 +1041,17 @@ if(BUILD_TESTING)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_test(NAME pc_spu_mix_m32 COMMAND memories_spu_mix_m32_test)
     endif()
+    # The stepped mixer's FIFO to a device (src/pc/audio/fifo.h): the game's
+    # side of the sound is the same however the device drains it.
+    add_executable(memories_audio_fifo_test tests/pc/audio_fifo_test.c src/pc/audio/spu.c)
+    target_include_directories(memories_audio_fifo_test PRIVATE src)
+    target_compile_definitions(memories_audio_fifo_test PRIVATE _POSIX_C_SOURCE=200809L)
+    if(NOT MSVC)
+        target_compile_options(memories_audio_fifo_test PRIVATE -O2 -fwrapv -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    find_package(Threads REQUIRED)
+    target_link_libraries(memories_audio_fifo_test PRIVATE Threads::Threads)
+    add_test(NAME pc_audio_fifo COMMAND memories_audio_fifo_test)
     add_executable(memories_controls_test tests/pc/controls_test.c src/pc/platform/controls.c)
     target_include_directories(memories_controls_test PRIVATE src)
     if(NOT MSVC)
@@ -1428,6 +1439,14 @@ if(Python3_Interpreter_FOUND)
         add_test(NAME pc_replay_check
             COMMAND "${Python3_EXECUTABLE}" tests/pc/replay_check_test.py
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        # The player's replays against the game (notes/replays.md): from boot,
+        # started and stopped at run time, played with a scratch copy of the
+        # saves, and a C line refused. Needs the game and MEMORIES_DISC;
+        # skipped without them, as on CI.
+        add_test(NAME pc_player_replay
+            COMMAND "${Python3_EXECUTABLE}" tests/pc/player_replay_test.py
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(pc_player_replay PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
         # yfm_control.py's replies against a made-up game: slow, closed, hung
         # (notes/agent-control.md).
         add_test(NAME pc_control_client

@@ -209,6 +209,15 @@ int Memories_StateLoadHere(const char *path, char *why, size_t why_size)
     return -1;
 }
 
+int Memories_StateStartupFailed(void)
+{
+#ifdef MEMORIES_TRANSLATED
+    return Memories_NativeStateStartupFailed();
+#else
+    return 0; /* no state loads on macOS ARM64 */
+#endif
+}
+
 int Memories_StateStartupDone(void)
 {
 #ifdef MEMORIES_TRANSLATED

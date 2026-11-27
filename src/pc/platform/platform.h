@@ -307,6 +307,12 @@ void Platform_ControlIdle(void);
 /* The virtual clock runs (MEMORIES_DETERMINISTIC=1, or the frame-dump
  * combination): what a recording needs to be played back. */
 int Platform_VirtualClock(void);
+/* A replay records or plays (src/pc/debug/recorder.c): the virtual clock
+ * from this VSync on, or the clock the run had again. From the game thread
+ * at a VSync. The tick handler's own schedule, kept in the clock's time, is
+ * moved with it through `rebase`, given the clock's new now. */
+void Platform_SetVirtualClock(int on);
+void Platform_OnClockRebase(void (*rebase)(uint64_t now));
 /* End the game at the next VSync, as closing the window does (no prompt). */
 void Platform_RequestQuit(void);
 void Platform_SetPresentCap(int fps);
@@ -337,4 +343,25 @@ int Platform_StartAudio(void (*mix)(int16_t *frames, size_t count));
  * no thread: the game thread mixes as the virtual clock steps. */
 int Platform_StartSilentAudio(void (*mix)(int16_t *frames, size_t count), const char *dump_path);
 void Platform_AudioStats(int *queued_frames, unsigned *underruns);
+/* A device's thread (or the silent sink's) mixes through this: the mix the
+ * backend started, or, while the stepped mixer runs, the game thread's frames
+ * from the FIFO (src/pc/audio/fifo.h). A backend names its mix first, before
+ * its thread or device starts. */
+void Platform_AudioThreadStarted(void (*mix)(int16_t *frames, size_t count));
+void Platform_ThreadMix(int16_t *out, size_t frames);
+/* While a replay records or plays: the game thread mixes the SPU as the
+ * virtual clock steps and the device plays those frames, so the game's sound
+ * driver reads the voices at the same game instants whenever the device
+ * drains. From the game thread; asked before the sound starts, it starts so. */
+void Platform_SetSteppedAudio(int on);
+/* File > Play replay...: the system's file dialog for a .yfmreplay, answered
+ * on its own thread. Platform_ChosenReplay, asked each frame: 1 with the
+ * file, -1 cancelled, -2 with why, 0 nothing (yet). Main thread. */
+void Platform_ChooseReplay(void);
+int Platform_ChosenReplay(char *path, size_t size, char *why, size_t why_size);
+/* While the stepped mixer's FIFO is on (a replay records or plays): 1, with
+ * the frames queued (the latency), those dropped at a full ring, the
+ * device's underruns and the frames it skipped (src/pc/audio/fifo.h); 0 and
+ * nothing filled in otherwise. The HUD's audio line. */
+int Platform_AudioFifoStats(unsigned *queued_frames, unsigned *dropped, unsigned *underruns, unsigned *skipped);
 #endif

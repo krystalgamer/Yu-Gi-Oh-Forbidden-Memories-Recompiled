@@ -111,11 +111,15 @@ void Memories_StateProcess(MemoriesStateRequests *requests, unsigned frames,
                 } else {
                     slot = (int)number;
                     snprintf(name, sizeof(name), "slot%d.state", slot);
-                    if (!state_path(path, sizeof(path), "MEMORIES_STATE_DIR", name)) actions->load(path, slot);
+                    if (!state_path(path, sizeof(path), "MEMORIES_STATE_DIR", name)) {
+                        actions->load(path, slot);
+                        requests->startup_failed = 1; /* a load that took does not return */
+                    }
                 }
             } else if (strlen(wanted) < sizeof(path)) {
                 memcpy(path, wanted, strlen(wanted) + 1);
                 actions->load(path, slot);
+                requests->startup_failed = 1; /* a load that took does not return */
             } else fprintf(stderr, "memories-pc: load-state path is too long\n");
         }
     }

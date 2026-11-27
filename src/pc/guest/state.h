@@ -119,6 +119,9 @@ int Memories_StateSaveHere(const char *path);
 int Memories_StateLoadHere(const char *path, char *why, size_t why_size);
 /* The boot's MEMORIES_LOAD_STATE has been acted on (from presented frame 30). */
 int Memories_StateStartupDone(void);
+/* MEMORIES_LOAD_STATE's load at startup was tried and refused (the reason
+ * is in the log): what a replay's start state needs to know. */
+int Memories_StateStartupFailed(void);
 /* The running build's id (the `buildid` file beside the executable). */
 uint32_t Memories_StateBuildId(void);
 /* Locate the running build's symbol table beside the executable. */

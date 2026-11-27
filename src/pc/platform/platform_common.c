@@ -16,6 +16,7 @@
 #include "pc/debug/profile.h"
 #include "pc/compat/signal.h"
 #include "pc/audio/spu.h"
+#include "pc/audio/fifo.h"
 #include "pc/render/soft_gpu.h"
 #include "controls_runtime.h"
 #include "settings.h"
@@ -39,7 +40,8 @@ static void (*tick_handler)(uint64_t, uint64_t);
 static volatile int rate = 100;
 static uint64_t real_prev, virtual_now, next_vblank;
 static unsigned virtual_remainder; /* hundredths of a microsecond a rate other than 100% left over */
-static volatile unsigned vblank_period = 16683;
+#define VBLANK_PERIOD 16683 /* NTSC; a vsynced present re-phases the real-time clock's to the display */
+static volatile unsigned vblank_period = VBLANK_PERIOD;
 static volatile int step_pending;
 static float present_refresh;
 static int present_cap;           /* frames per second; 0 display refresh; -1 every frame */
@@ -65,13 +67,17 @@ static volatile int watchdog_reported;
  * the frames are then shown at the game speed (pace(), which only sleeps),
  * and pause and frame step work; headless runs flat out. */
 static int deterministic_dump, deterministic_asked, deterministic_paced;
+/* Asked for at run time (Platform_SetVirtualClock): a replay records or plays. */
+static int clock_requested;
+static int headless_run;
+static void (*clock_rebase)(uint64_t);
 static volatile uint64_t deterministic_last_wait; /* real time the game last waited for a VBlank */
 static uint64_t pace_next;                         /* real time the next paced VBlank is due */
 static int controlled;                             /* a control client decides (Platform_ControlAttach) */
 
 static int virtual_clock(void)
 {
-    return deterministic_asked || (deterministic_dump && rate == -1);
+    return deterministic_asked || clock_requested || (deterministic_dump && rate == -1);
 }
 #define DETERMINISTIC_STEP 1000
 #define DETERMINISTIC_SPIN 1000000 /* real us outside a wait before the timer steps a spinning game */
@@ -108,6 +114,18 @@ static FILE *stepped_dump;    /* MEMORIES_DUMP_AUDIO, written as it is mixed */
 static uint32_t mix_fraction; /* ten-thousandths of a frame owed, below one frame */
 static uint32_t mix_owed;     /* whole frames owed: held (a save state), or stepped from the timer */
 
+/* The stepped mixer to a device (Platform_SetSteppedAudio): while a replay
+ * records or plays, the game thread mixes as above and an audio device's
+ * thread (or the silent sink's) plays those frames from a FIFO (fifo.h)
+ * instead of mixing them itself, so what the sound driver reads of the
+ * voices moves with the game's time, not with when the device asks. */
+static void (*thread_mix)(int16_t *, size_t); /* what a device or sink thread mixes (Platform_AudioThreadStarted) */
+static int stepped_wanted;                    /* a replay asked for it */
+static int stepped_by_request;                /* stepped_mixer is thread_mix through the FIFO */
+static AudioFifoGate fifo_gate;               /* the threads play the FIFO, or mix (fifo.h) */
+static AudioFifo audio_fifo;
+static int sink_drains;                       /* the silent sink's thread drains it, not a device */
+
 static void mix_owe(unsigned us)
 {
     uint32_t total = mix_fraction + 441u * us; /* 44100 frames a second */
@@ -124,6 +142,7 @@ static void mix_owed_frames(void)
         size_t count = mix_owed < 256 ? mix_owed : 256;
         stepped_mixer(buffer, count);
         mix_owed -= (uint32_t)count;
+        if (stepped_by_request) AudioFifo_Push(&audio_fifo, buffer, count);
         if (stepped_dump) {
             fwrite(buffer, sizeof(int16_t) * 2, count, stepped_dump);
             unflushed += (unsigned)count;
@@ -366,7 +385,8 @@ int Platform_StartTimers(void (*tick)(uint64_t, uint64_t), void (*vblank)(void))
     deterministic_dump = (getenv("MEMORIES_HEADLESS") != NULL || getenv("MEMORIES_DETERMINISTIC") != NULL) &&
                          (getenv("MEMORIES_DUMP_FRAME") != NULL || getenv("MEMORIES_DUMP_FRAMES") != NULL);
     deterministic_asked = deterministic_env();
-    deterministic_paced = deterministic_asked && getenv("MEMORIES_HEADLESS") == NULL;
+    headless_run = getenv("MEMORIES_HEADLESS") != NULL;
+    deterministic_paced = (deterministic_asked || clock_requested) && !headless_run;
     last_vsync_real = now_us();
     {
         const char *watchdog = getenv("MEMORIES_WATCHDOG");
@@ -474,6 +494,49 @@ void Platform_ControlAttach(int attached)
 int Platform_VirtualClock(void)
 {
     return virtual_clock();
+}
+
+void Platform_OnClockRebase(void (*rebase)(uint64_t))
+{
+    clock_rebase = rebase;
+}
+
+/* From the game thread at a VSync. Going virtual, what a state carries of
+ * the clock is brought into the range a load takes back (Platform_State):
+ * the VBlank owed or due within four periods, at the console's period (a
+ * vsynced present had put the display's), and the tick handler's own
+ * schedule, which ran on the host's time, moved to virtual time
+ * (Platform_OnClockRebase); going back, the other way. */
+void Platform_SetVirtualClock(int on)
+{
+    sigset_t set, previous;
+    int was;
+    sigemptyset(&set);
+    sigaddset(&set, SIGALRM);
+    sigprocmask(SIG_BLOCK, &set, &previous);
+    was = virtual_clock();
+    clock_requested = on != 0;
+    deterministic_paced = (deterministic_asked || clock_requested) && !headless_run;
+    if (tick_handler && was != virtual_clock()) {
+        uint64_t now = now_us();
+        if (virtual_clock()) {
+            vblank_period = VBLANK_PERIOD;
+            if (next_vblank && next_vblank <= virtual_now) next_vblank = virtual_now + 1;
+            if (next_vblank > virtual_now + vblank_period) next_vblank = virtual_now + vblank_period;
+            deterministic_last_wait = now;
+            pace_next = 0;
+            if (clock_rebase) clock_rebase(virtual_now);
+        } else {
+            real_prev = now;
+            /* Virtual time stood on while this clock ran: when the last VBlank
+             * was due and came are stale, and a vsynced present would take
+             * them for a VBlank long past (Platform_NotifyPresent). The last
+             * one is now. */
+            vblank_due_at = vblank_came_at = virtual_now;
+            if (clock_rebase) clock_rebase(now);
+        }
+    }
+    sigprocmask(SIG_SETMASK, &previous, NULL);
 }
 
 void Platform_ControlIdle(void)
@@ -698,17 +761,46 @@ static void nap_before_due(void)
 }
 #endif
 
+/* Whether the FIFO's fill paces the game (fifo.h, AudioFifo_PacePeriod):
+ * while a device plays the stepped mixer's frames, at 100 %. Not the silent
+ * sink's thread (no device: MEMORIES_NO_AUDIO, none found), whose nanosleep
+ * drains slower than real time and would only slow a game nobody hears. */
+static int fifo_paces(void)
+{
+    return stepped_by_request && !sink_drains && rate == 100;
+}
+
 /* The virtual clock in a window (MEMORIES_DETERMINISTIC=1 without
  * MEMORIES_HEADLESS), before a VBlank: paused, nothing moves until the pause
  * ends or a frame step lets one VBlank through; running, the VBlank waits
  * for its real time at the game speed. It only sleeps and pumps the
- * window's events, so the game sees the same as uncapped. */
+ * window's events, so the game sees the same as uncapped.
+ *
+ * While a replay records or plays, a device plays the frames the game mixed
+ * from the FIFO, and at 100 % its fill moves the grid (fifo_paces): each
+ * period is nudged by at most 1/128 toward AUDIO_FIFO_TARGET, and a VBlank
+ * late after a stall does not catch up while the fill is above it, so the
+ * latency stays near 70 ms instead of growing by each stall's silence, and a
+ * device clock a little off real time sets the pace instead of drifting the
+ * fill into skips or underruns. It reads the FIFO's two counts and writes
+ * only pace_next: when the host sleeps, never what the game sees. Under it:
+ * - Turbo (400 %) and any other speed keep the plain grid: the game mixes
+ *   faster or slower than the device plays, and the device skips past
+ *   AUDIO_FIFO_MOST or runs dry, as before.
+ * - Paused (0 %), nothing is mixed: the device fades out and plays silence
+ *   until AUDIO_FIFO_PRIME frames are queued again.
+ * - A frame step lets one VBlank's frames (about 735) through; every third
+ *   step or so primes the device for a short burst. Neither reaches the rule
+ *   (the rate is 0) and the grid starts again after either.
+ * - A control client steps the game itself: pace() does nothing then (and
+ *   headless, nothing is paced), so the rule is off with it; the silent
+ *   sink's thread, the one draining a headless client's FIFO, never paces. */
 static void pace(void)
 {
 #ifndef _WIN32
     struct timespec nap = {0, 500000};
 #endif
-    uint64_t now;
+    uint64_t now, period, wake;
     if (!deterministic_paced || controlled) return;
     while (rate == 0 && !step_pending && !Platform_ShouldQuit()) {
         deterministic_last_wait = now_us(); /* waiting, not spinning (advance) */
@@ -725,18 +817,20 @@ static void pace(void)
         pace_next = 0;
         return;
     }
+    period = (uint64_t)vblank_period * 100u / (unsigned)rate;
     now = now_us();
-    if (!pace_next || now > pace_next + 100000u) pace_next = now; /* a stall: start the grid again */
-    while (now < pace_next) {
+    /* The grid, a stall's restart and the FIFO's nudge: fifo.h, which the
+     * tests run too. */
+    wake = AudioFifo_PaceGrid(&pace_next, now, period, fifo_paces(), AudioFifo_Queued(&audio_fifo));
+    while (now < wake) {
 #ifdef _WIN32
-        sleep_toward(now, pace_next, ~0u);
+        sleep_toward(now, wake, ~0u);
 #else
-        struct timespec rest = {0, (long)(pace_next - now) * 1000};
+        struct timespec rest = {0, (long)(wake - now) * 1000};
         nanosleep(&rest, NULL);
 #endif
         now = now_us();
     }
-    pace_next += (uint64_t)vblank_period * 100u / (unsigned)rate;
 }
 
 void Platform_PollTime(void)
@@ -963,15 +1057,13 @@ int Platform_ScriptedPad2(void)
  * drained by the mixer. Under MEMORIES_DETERMINISTIC=1 neither has a thread:
  * the game thread mixes as virtual time passes (mix_step, above), and the
  * dump is written from there, as long as the game's virtual time. */
-static void (*silent_mixer)(int16_t *, size_t);
-
 static void *run_silent(void *path)
 {
     static int16_t buffer[256 * 2];
     FILE *file = path ? fopen(path, "wb") : NULL;
     struct timespec nap = {0, 256 * 1000000000ll / 44100};
     for (;;) {
-        silent_mixer(buffer, 256);
+        Platform_ThreadMix(buffer, 256);
         if (file) {
             fwrite(buffer, sizeof(buffer), 1, file);
             fflush(file);
@@ -993,11 +1085,63 @@ int Platform_StartSilentAudio(void (*mix)(int16_t *, size_t), const char *dump_p
         return 0;
     }
 #endif
-    silent_mixer = mix;
+    sink_drains = 1; /* no device's clock for the pacer to follow (fifo_paces) */
+    Platform_AudioThreadStarted(mix);
     /* The timer signal is the game's interrupt and must stay on the main thread. */
     sigfillset(&all);
     pthread_sigmask(SIG_BLOCK, &all, &previous);
     error = pthread_create(&thread, NULL, run_silent, (void *)dump_path);
     pthread_sigmask(SIG_SETMASK, &previous, NULL);
     return error ? -1 : 0;
+}
+
+void Platform_ThreadMix(int16_t *out, size_t frames)
+{
+    AudioFifoGate_Call(&fifo_gate, &audio_fifo, out, frames, thread_mix);
+}
+
+static void stepped_audio(int on)
+{
+    if (on) {
+        /* No thread to take over (headless under MEMORIES_DETERMINISTIC,
+         * which already steps, or no sound started yet), or done. */
+        if (stepped_by_request || !thread_mix || stepped_mixer) return;
+        AudioFifo_Reset(&audio_fifo);
+        mix_fraction = mix_owed = 0;
+        AudioFifoGate_Switch(&fifo_gate, 1);
+        stepped_mixer = thread_mix;
+        stepped_by_request = 1;
+        fprintf(stderr, "memories-pc: audio: the game thread mixes as the virtual clock steps; the device plays it "
+                        "from a FIFO\n");
+    } else if (stepped_by_request) {
+        stepped_mixer = NULL;
+        stepped_by_request = 0;
+        mix_fraction = mix_owed = 0;
+        /* A thread that read the gate as on may still be inside AudioFifo_Pop,
+         * and the next start resets the FIFO: the switch waits until it has left. */
+        AudioFifoGate_Switch(&fifo_gate, 0);
+        fprintf(stderr, "memories-pc: audio: the device mixes again\n");
+    }
+}
+
+void Platform_AudioThreadStarted(void (*mix)(int16_t *, size_t))
+{
+    thread_mix = mix;
+    if (stepped_wanted) stepped_audio(1);
+}
+
+void Platform_SetSteppedAudio(int on)
+{
+    stepped_wanted = on != 0;
+    stepped_audio(stepped_wanted);
+}
+
+int Platform_AudioFifoStats(unsigned *queued_frames, unsigned *dropped, unsigned *underruns, unsigned *skipped)
+{
+    if (!stepped_by_request) return 0;
+    if (queued_frames) *queued_frames = AudioFifo_Queued(&audio_fifo);
+    if (dropped) *dropped = audio_fifo.dropped;
+    if (underruns) *underruns = AudioFifo_Underruns(&audio_fifo);
+    if (skipped) *skipped = AudioFifo_Skipped(&audio_fifo);
+    return 1;
 }

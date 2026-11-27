@@ -10,6 +10,7 @@
 #include "pc/debug/log.h"
 #include "pc/guest/state.h"
 #include "pc/saves/deck_menu.h"
+#include "pc/debug/recorder.h"
 
 void HostActions_StepVolume(int up)
 {
@@ -21,6 +22,14 @@ void HostActions_StepVolume(int up)
         Settings_Save();
     }
     LOG(LOG_MENU, "master volume %d%s", volume, Spu_Muted() ? " (muted)" : "");
+}
+
+/* Game > Record replay / Stop recording (recorder.h): the recording starts at
+ * the game's next VSync. Not while a player's replay plays. */
+void HostActions_ToggleRecording(void)
+{
+    if (Recorder_Recording()) Recorder_Stop();
+    else if (!Recorder_PlayingReplay()) Recorder_RequestStart();
 }
 
 static int (*exit_claim)(void);
@@ -48,6 +57,8 @@ static void press(int action, int *quit)
     case CTRL_HOST_MUTE: Spu_SetMuted(!Spu_Muted()); break;
     case CTRL_HOST_VOLUME_UP: case CTRL_HOST_VOLUME_DOWN: HostActions_StepVolume(action == CTRL_HOST_VOLUME_UP); break;
     case CTRL_HOST_SAVE_STATE: case CTRL_HOST_LOAD_STATE:
+        /* A replay holds the pads only: a load ends a recording, or a play, first. */
+        if (action == CTRL_HOST_LOAD_STATE) Recorder_HostAction("Load state");
         Memories_StateRequest(action == CTRL_HOST_SAVE_STATE ? 1 : 2, Platform_StateSlot());
         break;
     case CTRL_HOST_SLOT_1: case CTRL_HOST_SLOT_2: case CTRL_HOST_SLOT_3: case CTRL_HOST_SLOT_4:
@@ -61,7 +72,11 @@ static void press(int action, int *quit)
         Settings_Set(SET_SHOW_HUD, (Settings_Get(SET_SHOW_HUD) + 1) % 3);
         Settings_Save();
         break;
-    case CTRL_HOST_DECK_SLOTS: DeckMenu_Request(); break;
+    case CTRL_HOST_DECK_SLOTS:
+        Recorder_HostAction("The deck slots");
+        DeckMenu_Request();
+        break;
+    case CTRL_HOST_RECORD_REPLAY: HostActions_ToggleRecording(); break;
     default: break;
     }
 }

@@ -7,6 +7,8 @@
  * does. Returns 1 when something the menu shows changed (repaint).
  * Main thread only. */
 int HostActions_Run(int *quit);
+/* Record replay (F8, Game > Record replay): starts or stops a recording. */
+void HostActions_ToggleRecording(void);
 
 /* Who may take an Exit game press before it asks to quit: the window, for
  * a mod that claimed Escape (host->capture_mouse, API 19). `claim` returns

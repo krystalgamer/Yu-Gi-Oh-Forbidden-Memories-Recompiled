@@ -133,6 +133,18 @@ static void run_vblank(void)
     }
 }
 
+/* The clock changed between the host's time and virtual time
+ * (Platform_SetVirtualClock): the sequencer's next tick keeps its distance. */
+static void rebase_clock(uint64_t real_now)
+{
+    if (counter_next_us) {
+        uint64_t phase = counter_next_us > last_real_us ? counter_next_us - last_real_us : 1;
+        counter_next_us = real_now + (phase < counter_period_us ? phase : counter_period_us);
+    }
+    last_real_us = real_now;
+    Platform_SetTickDue(counter_next_us);
+}
+
 static void on_tick(uint64_t game_now, uint64_t real_now)
 {
     last_game_us = game_now;
@@ -184,6 +196,7 @@ int ResetCallback(void)
 {
     if (!started) {
         started = 1;
+        Platform_OnClockRebase(rebase_clock);
         Recorder_Init(); /* before the first VBlank */
         Mods_PadSource = mods_pad;
         if (Platform_StartTimers(on_tick, on_vblank) != 0) {

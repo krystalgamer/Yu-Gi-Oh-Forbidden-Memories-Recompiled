@@ -37,6 +37,9 @@
 #include "pc/saves/deck_menu.h"
 #include "pc/sdk/disc.h"
 #include "pc/text/language.h"
+#include "pc/debug/recorder.h"
+#include "pc/debug/replay_file.h"
+#include "host_actions.h"
 #ifdef _WIN32
 #include "win32.h"
 #else
@@ -100,6 +103,7 @@ enum {
     SLIDER_MASTER, SLIDER_MUSIC, SLIDER_SFX, CHECK_MUTE,
     CHECK_HUD, CHECK_HUD_FULL, RADIO_STATE_SLOT, ACT_UNLOCK_FREE_DUELISTS, ACT_RESET_COLOR,
     ACT_CHECK_UPDATES, ACT_RELEASES, ACT_VERSION, ACT_SET_STARCHIPS, RADIO_LANGUAGE, ACT_SYSTEM_INFO, ACT_JUMP,
+    ACT_RECORD_REPLAY, ACT_PLAY_REPLAY, ACT_STOP_REPLAY, ACT_RECORD_BOOT,
     CHECK_TRACE = 300  /* value is a LogChannel */
 };
 
@@ -132,6 +136,15 @@ enum { SUB_SCALE, SUB_MENU_SIZE, SUB_SPEED, SUB_FPS, SUB_CHEATS, SUB_TRACE, SUB_
 #else
 #define VIDEO_ITEMS 15
 #endif
+/* Replays (notes/replays.md) are the desktop's: File > Play replay... and
+ * Stop replay, Game > Record replay and Record replay from boot... */
+#ifdef __ANDROID__
+#define FILE_ITEMS 10
+#define GAME_ITEMS 11
+#else
+#define FILE_ITEMS 12
+#define GAME_ITEMS 13
+#endif
 static Menu menus[MENU_COUNT] = {
     {"File", {{"Save state", "F5", ITEM_ACTION, ACT_SAVE_STATE, -1},
               {"Load state", "F7", ITEM_ACTION, ACT_LOAD_STATE, -1},
@@ -139,10 +152,14 @@ static Menu menus[MENU_COUNT] = {
               {"State slot 2", 0, ITEM_RADIO, RADIO_STATE_SLOT, -1, 2},
               {"State slot 3", 0, ITEM_RADIO, RADIO_STATE_SLOT, -1, 3},
               {"State slot 4", 0, ITEM_RADIO, RADIO_STATE_SLOT, -1, 4},
+#ifndef __ANDROID__
+              {"Play replay...", 0, ITEM_ACTION, ACT_PLAY_REPLAY, -1, 0, ITEM_GROUP_BREAK},
+              {"Stop replay", 0, ITEM_ACTION, ACT_STOP_REPLAY, -1, 0, ITEM_DISABLED},
+#endif
               {"Screenshot", "F12", ITEM_ACTION, ACT_SCREENSHOT, -1, 0, ITEM_GROUP_BREAK},
               {"Reload settings", 0, ITEM_ACTION, ACT_RELOAD_SETTINGS, -1},
               {"Confirm before quitting", 0, ITEM_CHECK, 0, SET_CONFIRM_QUIT, 0, ITEM_GROUP_BREAK},
-              {"Exit", "Esc", ITEM_ACTION, ACT_EXIT, -1}}, 10},
+              {"Exit", "Esc", ITEM_ACTION, ACT_EXIT, -1}}, FILE_ITEMS},
     {"Video", {{"Window scale", 0, ITEM_SUBMENU, 0, -1, SUB_SCALE},
               {"Menu size", 0, ITEM_SUBMENU, 0, -1, SUB_MENU_SIZE},
               {"Fullscreen", "F11", ITEM_CHECK, MENU_ITEM_FULLSCREEN, SET_FULLSCREEN, 0, ITEM_GROUP_BREAK},
@@ -181,7 +198,11 @@ static Menu menus[MENU_COUNT] = {
               {"Browse cards with Up/Down", 0, ITEM_CHECK, 0, SET_CARD_BROWSE, 0, ITEM_GROUP_BREAK},
               {"Cheats", 0, ITEM_SUBMENU, 0, -1, SUB_CHEATS, ITEM_GROUP_BREAK},
               {"Language", 0, ITEM_SUBMENU, 0, -1, SUB_LANGUAGE},
-              {"Restart game...", 0, ITEM_ACTION, MENU_ITEM_RESTART, -1, 0, ITEM_GROUP_BREAK | ITEM_DISABLED}}, 11},
+#ifndef __ANDROID__
+              {"Record replay", 0, ITEM_ACTION, ACT_RECORD_REPLAY, -1, 0, ITEM_GROUP_BREAK},
+              {"Record replay from boot...", 0, ITEM_ACTION, ACT_RECORD_BOOT, -1},
+#endif
+              {"Restart game...", 0, ITEM_ACTION, MENU_ITEM_RESTART, -1, 0, ITEM_GROUP_BREAK | ITEM_DISABLED}}, GAME_ITEMS},
     {"View", {{"Fusion helper", 0, ITEM_CHECK, 0, SET_FUSION_HELPER},
               {"Card passwords", 0, ITEM_CHECK, 0, SET_CARD_PASSWORDS},
               {"Library: show every card", 0, ITEM_CHECK, 0, SET_LIBRARY_ALL_CARDS},
@@ -1836,6 +1857,7 @@ static int notice_event(const MenuEvent *event, int *quit)
 
 
 static void update_card_drops_item(void);
+static void update_replay_items(void);
 static int slider_value(const Item *item);
 
 void Menu_Draw(MenuCanvas *into)
@@ -1846,6 +1868,7 @@ void Menu_Draw(MenuCanvas *into)
         return;
     }
     update_card_drops_item();
+    update_replay_items();
     if (!visible) {
         if (notice.shown) draw_notice();
         return;
@@ -2138,10 +2161,146 @@ static void give_cards(int count)
     need_save(Cheats_TopUpAllCards(count));
 }
 
+static const char *replay_breaker(const Item *item)
+{
+    switch (item->id) {
+    case ACT_LOAD_STATE: return "Load state";
+    case ACT_GIVE_CARDS: case ACT_UNLOCK_FREE_DUELISTS: case ACT_SET_STARCHIPS: return "A cheat";
+    case ACT_JUMP: case MENU_ITEM_TITLE: case MENU_ITEM_RESTART: return "Jump to";
+    case MENU_ITEM_DECKS: return "The deck slots";
+    default: break;
+    }
+    if (item->setting == SET_CHEAT_FREE_SPENDING || item->setting == SET_CHEAT_LIFE_POINTS ||
+        item->setting == SET_CHEAT_SHOW_HAND)
+        return "A cheat";
+    return NULL;
+}
+
+#ifndef __ANDROID__
+static void replay_not_played(const char *why)
+{
+    static const char *const ok[] = {"OK"};
+    Menu_ShowNotice("Replay not played", why, ok, 1, 0, NULL);
+}
+
+/* The file File > Play replay... chose: the game restarts into it. */
+static char replay_chosen[1024];
+
+static void play_replay(const char *file)
+{
+    char why[sizeof(notice.text)];
+    if (ReplayFile_SetNext(file)) {
+        snprintf(why, sizeof(why), "The replay could not be named for the restart in %s.", Paths_UserDir());
+        replay_not_played(why);
+    } else if (Platform_RestartGame() < 0) {
+        ReplayFile_DropNext(); /* the request is taken back: no later start may play from it */
+        replay_not_played("The game could not restart itself, so the replay was not played.");
+    }
+}
+
+static void stop_replay_chosen(int button, int *quit)
+{
+    (void)quit;
+    if (button == 0 && Platform_RestartGame() < 0)
+        replay_not_played("The game could not restart itself. Start it again to go back to the title.");
+}
+
+/* Its question answered (play_replay_ask). */
+static void play_replay_chosen(int button, int *quit)
+{
+    (void)quit;
+    if (button == 0) play_replay(replay_chosen);
+}
+
+/* Once the file is chosen: asked, as Game > Restart game is, since the
+ * restart drops unsaved progress. The dialog runs on its own thread while
+ * the game plays on, so a tower's duel (Tower_Guard) is asked about again
+ * here, before the question, as well as at the click. */
+static void play_replay_ask(const char *file)
+{
+    static const char *const buttons[] = {"Restart and play", "Cancel"};
+    if (Tower_Guard(TOWER_GUARD_JUMP, 1, NULL, 0)) return;
+    snprintf(replay_chosen, sizeof(replay_chosen), "%s", file);
+    /* Cancel is focused and last, so Enter and Escape both keep playing. */
+    Menu_ShowNotice("Play replay", "Restart the game and play the replay? Unsaved progress is lost.", buttons, 2, 1,
+                    play_replay_chosen);
+}
+
+/* Record replay from boot...: asked first, as Restart game, Stop replay and
+ * Play replay... do. The restart records from the next start's first frame
+ * (Recorder_BootRequest). */
+static void record_boot_chosen(int button, int *quit)
+{
+    char why[sizeof(notice.text)];
+    (void)quit;
+    if (button != 0) return;
+    if (Recorder_BootRequest(NULL, why, sizeof(why)) || Recorder_BootRestart(why, sizeof(why))) {
+        static const char *const ok[] = {"OK"};
+        Menu_ShowNotice("Recording not started", why, ok, 1, 0, NULL);
+    }
+}
+#endif
+
+/* The replay rows as the recorder is, and its notices. */
+static void update_replay_items(void)
+{
+#ifndef __ANDROID__
+    char title[64], text[sizeof(notice.text)], chosen[1024];
+    int recording = Recorder_Recording(), replay = Recorder_PlayingReplay(), m, i;
+    for (m = 0; m < MENU_COUNT; m++)
+        for (i = 0; i < menus[m].count; i++) {
+            Item *item = &menus[m].items[i];
+            if (item->id == ACT_RECORD_REPLAY) {
+                item->label = recording ? "Stop recording" : "Record replay";
+                item->flags = (item->flags & ~ITEM_DISABLED) | (replay ? ITEM_DISABLED : 0);
+            } else if (item->id == ACT_STOP_REPLAY) {
+                item->flags = (item->flags & ~ITEM_DISABLED) | (replay ? 0 : ITEM_DISABLED);
+            } else if (item->id == ACT_RECORD_BOOT) {
+                item->flags = (item->flags & ~ITEM_DISABLED) | (replay || recording ? ITEM_DISABLED : 0);
+            }
+        }
+    if (!notice.shown && Recorder_TakeNotice(title, sizeof(title), text, sizeof(text))) {
+        static const char *const ok[] = {"OK"};
+        Menu_ShowNotice(title, text, ok, 1, 0, NULL);
+    }
+    switch (Platform_ChosenReplay(chosen, sizeof(chosen), text, sizeof(text))) {
+    case 1: play_replay_ask(chosen); break;
+    case -2: replay_not_played(text); break;
+    default: break;
+    }
+#endif
+}
+
 static void activate(const Item *item, int *quit)
 {
+    const char *breaker;
     if (item->flags & ITEM_DISABLED) return;
+    if ((breaker = replay_breaker(item)) != NULL) Recorder_HostAction(breaker);
     switch (item->id) {
+#ifndef __ANDROID__
+    case ACT_RECORD_REPLAY: HostActions_ToggleRecording(); break;
+    case ACT_PLAY_REPLAY:
+        /* A restart: a tower's duel is not left by one, asked before the dialog (and its question). */
+        if (!Tower_Guard(TOWER_GUARD_JUMP, 1, NULL, 0)) Platform_ChooseReplay();
+        break;
+    case ACT_RECORD_BOOT: {
+        static const char *const buttons[] = {"Restart and record", "Cancel"};
+        /* A restart: a tower's duel is not left by one (Tower_Guard, with its notice), asked before the question. */
+        if (Tower_Guard(TOWER_GUARD_JUMP, 1, NULL, 0)) break;
+        /* Cancel is focused and last, so Enter and Escape both keep playing. */
+        Menu_ShowNotice("Record replay from boot",
+                        "Restart the game and record a replay from its first frame? Unsaved progress is lost. "
+                        "The replay holds none of the game's data, only what you press and your saves as they "
+                        "are now.", buttons, 2, 1, record_boot_chosen);
+        break;
+    }
+    case ACT_STOP_REPLAY: {
+        static const char *const buttons[] = {"Back to the title", "Cancel"};
+        Menu_ShowNotice("Stop replay", "Stop the replay and go back to the title? The game restarts.", buttons, 2, 0,
+                        stop_replay_chosen);
+        break;
+    }
+#endif
     case ACT_MODS: Platform_OpenMods(); break;
     case ACT_CONTROLS: Platform_OpenControls(); break;
     case ACT_SAVE_STATE: Memories_StateRequest(1, Platform_StateSlot()); break;
@@ -2243,6 +2402,7 @@ static int item_action(const Item *item)
     case MENU_ITEM_FULLSCREEN: return CTRL_HOST_FULLSCREEN;
     case CHECK_MUTE: return CTRL_HOST_MUTE;
     case MENU_ITEM_DECKS: return CTRL_HOST_DECK_SLOTS;
+    case ACT_RECORD_REPLAY: return CTRL_HOST_RECORD_REPLAY;
     case CHECK_HUD: return CTRL_HOST_HUD;
     case ACT_PAUSE: return CTRL_HOST_PAUSE;
     case ACT_FRAME_STEP: return CTRL_HOST_FRAME_STEP;

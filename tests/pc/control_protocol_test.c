@@ -56,6 +56,13 @@ static void commands(void)
     CHECK(parse("save /tmp/x.state", &c) == 0 && c.kind == CONTROL_SAVE && !strcmp(c.path, "/tmp/x.state"));
     CHECK(parse("load x.state\r", &c) == 0 && c.kind == CONTROL_LOAD && !strcmp(c.path, "x.state"));
     CHECK(parse("load   ", &c) == -1 && strstr(error, "usage: load"));
+    CHECK(parse("record D:/a b/r.yfmreplay", &c) == 0 && c.kind == CONTROL_RECORD && !strcmp(c.path, "D:/a b/r.yfmreplay"));
+    CHECK(parse("record stop", &c) == 0 && c.kind == CONTROL_RECORD && !c.path);
+    CHECK(parse("record", &c) == -1 && strstr(error, "usage: record"));
+    CHECK(parse("record_boot D:/a b/r.yfmreplay", &c) == 0 && c.kind == CONTROL_RECORD_BOOT &&
+          !strcmp(c.path, "D:/a b/r.yfmreplay"));
+    CHECK(parse("record_boot", &c) == -1 && strstr(error, "usage: record_boot"));
+    CHECK(parse("record_boot stop", &c) == 0 && !strcmp(c.path, "stop")); /* a file named stop: not a command */
     CHECK(parse("hash", &c) == 0 && c.kind == CONTROL_HASH);
     CHECK(parse("info", &c) == 0 && c.kind == CONTROL_INFO);
     CHECK(parse("quit", &c) == 0 && c.kind == CONTROL_QUIT);

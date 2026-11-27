@@ -110,6 +110,10 @@ int Mods_ImportRemoveInstalled(const char *mods, const char *directory, char *wh
  * not 0; "Cancelled." when Mods_ImportWatch's *cancel is set, checked before
  * and in every chunk). Progress goes to Mods_ImportWatch's *done. */
 #define MODS_MODPACK_JSON_MAX (64ul << 20) /* modpack.json: a list of every file and its SHA-256 */
+/* The name of the .zip's `index`th file (folders left out, in the order the
+ * reader keeps them, every name checked as above), or NULL past
+ * the last: what a replay's .yfmreplay holds (src/pc/debug/replay_file.c). */
+const char *Mods_ImportFile(const ModsImport *import, int index);
 int Mods_ImportExtract(ModsImport *import, const char *name, const char *path, unsigned long max, char *why,
                        size_t why_size);
 /* A .zip written entry by entry (deflated, UTF-8 names): Create, Add..., then
