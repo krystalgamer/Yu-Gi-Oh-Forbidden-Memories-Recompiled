@@ -552,6 +552,13 @@ void Platform_ControlIdle(void)
 #endif
 }
 
+static void (*paused_serve)(void);
+
+void Platform_OnPaused(void (*serve)(void))
+{
+    paused_serve = serve;
+}
+
 void Platform_ControlHold(int held)
 {
     sigset_t set, previous;
@@ -805,6 +812,9 @@ static void pace(void)
     while (rate == 0 && !step_pending && !Platform_ShouldQuit()) {
         deterministic_last_wait = now_us(); /* waiting, not spinning (advance) */
         Platform_PumpEvents();
+        /* The channel's turn, not the game's: a frame step still ends this
+         * loop (above) and its one VBlank runs as without a client. */
+        if (paused_serve) paused_serve();
 #ifdef _WIN32
         Win32_Heartbeat(); /* paused, not hung */
         Win32_Sleep(500);
@@ -949,7 +959,10 @@ __attribute__((noinline)) static void wait_vblank(unsigned count_at_entry)
         } else {
             service();
             if (vblank_count != count_at_entry) break;
-            if (rate == 0) Platform_PumpEvents();
+            if (rate == 0) {
+                Platform_PumpEvents();
+                if (paused_serve) paused_serve(); /* a frame step ended this wait above, with its VBlank */
+            }
 #ifdef _WIN32
             if (rate == 0) Win32_Heartbeat(); /* paused, not hung */
             Win32_ServiceInterrupt();

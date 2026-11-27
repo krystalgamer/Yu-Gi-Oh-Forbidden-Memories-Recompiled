@@ -304,6 +304,13 @@ void Platform_ControlHold(int held);
 /* Waiting for a client before one is attached (the watchdog still on):
  * a heartbeat for the freeze watches. */
 void Platform_ControlIdle(void);
+/* The control channel's turn while the game is paused (rate 0): `serve` is
+ * called, on the game's thread, from each pass of the pause's wait (the
+ * clock's pause loop in pace(), and a wait for a VBlank that cannot come),
+ * after the window's events were pumped. It runs between two VBlanks, at no
+ * state point, and must neither advance the clock nor change what the guest
+ * sees (control.c, Control_Paused, says what it does). NULL: none. */
+void Platform_OnPaused(void (*serve)(void));
 /* The virtual clock runs (MEMORIES_DETERMINISTIC=1, or the frame-dump
  * combination): what a recording needs to be played back. */
 int Platform_VirtualClock(void);

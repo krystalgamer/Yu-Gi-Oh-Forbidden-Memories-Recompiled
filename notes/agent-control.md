@@ -199,6 +199,23 @@ build with the old combination; the eight smoke cases unchanged.
   deterministic run, and a 3 s wait between two steps changes nothing.
   `MEMORIES_CLOCK=interrupt` keeps its timer running while the client holds
   the game (logged); lockstep needs the default cooperative clock.
+- **While the game is paused** (rate 0: a player's pause, the end of a
+  windowed play): the game waits inside a frame, not at a `Control_Point`,
+  and used to answer no one for as long as the pause lasted. Now its wait
+  calls `serve_paused` (`Platform_OnPaused`), which takes a client (as
+  `Control_Point` does) and answers, in order, `info`, `step 0`, `peek`,
+  `quit` and a line that does not parse: they read the game or ask it to
+  close, and run no clock, VBlank or guest code. Everything else (`pad`,
+  `pointer`, `wheel`, `key`, `step N`, `poke`, `jump`, `load`, `save`,
+  `shot`, `hash`, `record`...) waits queued until the game runs again, and
+  the first of them holds back the ones behind it, so replies stay in the
+  commands' order; a client attached before the pause, with a step in
+  flight, is answered `quit` only (its step's reply comes first). The pause
+  is still the player's: attaching does not end it, and a frame step ends
+  the wait for one VBlank as it does without a client. Checked headless on
+  the real clock (`MEMORIES_CRASH_TEST=pause@60`, CTest `pc_control_paused`);
+  the window's pause loop in `pace()` runs the same function and is not run
+  by that test.
 - **Cost:** with `MEMORIES_CONTROL` unset, `Control_Point` returns at its
   first test and the pads it adds are 0. The eight smoke cases pass, and
   7000 frame hashes of a run without it equal the origin/master build's.
@@ -299,8 +316,9 @@ replay can begin at a state.
 - **Play:** `MEMORIES_PLAY=path` gives the pads the file's bits (the live
   ones are ignored) and ends the game at its `E`; a player's `.yfmreplay`
   in a window pauses there instead (notes/replays.md), unless
-  `MEMORIES_CONTROL` is set, so a client is never left waiting on a pause
-  that does not serve the channel. A mod's `host->pad`
+  `MEMORIES_CONTROL` is set: a script that plays a replay waits for the game
+  to end, which a pause would not (the pause answers `info` and `quit` now,
+  but is no end). A mod's `host->pad`
   reads the played bits too (`Mods_PadSource`): it used to read the
   keyboard directly, so the hand camera's L1 was lost in a play. It now
   also sees a control client's bits, which it did not.
