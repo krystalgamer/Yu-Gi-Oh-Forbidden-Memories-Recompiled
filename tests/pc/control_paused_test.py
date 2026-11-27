@@ -22,7 +22,7 @@ taken by the pause's wait:
      says "not gone" while unread bytes wait).
   6. `quit` is answered, and the game ends with exit code 0.
 
-Two more games:
+Three more games:
   - A client attached before the pause, with a step in flight: its `quit`
     gets the step's reply first (an "err"), then its own "ok", and the game
     ends with exit code 0.
@@ -30,11 +30,16 @@ Two more games:
     own wait: `info` is answered and `quit` ends the game with exit code 0 (it
     used to spin at full speed, never reaching VSync's exit).
 
+  - MEMORIES_CRASH_TEST=pause@600 pauses a game that polls VSync(-1) or
+    VSync(1) instead of waiting for a VBlank (the intro movie's wait for
+    sectors; it had no answer, and `quit` was never seen): `info` and `step 0`
+    are answered, nothing moves, and `quit` ends the game with exit code 0
+    within seconds (Platform_PollTime serves the pause's hook at rate 0, and
+    VSync(-1) ends in LibEtc_ExitIfQuit).
+
 What this does not cover: a window's pause (the pause loop of pace(), which
-a headless game never runs), a frame step, and a pause where the game polls
-VSync(-1) or VSync(1) instead of waiting for a VBlank (on the real clock the
-poll does not reach the hook: a pause at frame 600 is not served, most likely
-the intro movie's wait for sectors)."""
+a headless game never runs, and the window events the poll now pumps), and a
+frame step."""
 from __future__ import annotations
 
 import os
@@ -238,6 +243,27 @@ def quit_outside_vsync0() -> None:
         game.close()
 
 
+def quit_while_polling() -> None:
+    """A pause at frame 600, where the game polls VSync(-1) or VSync(1)
+    rather than waiting for a VBlank: the poll serves the hook and `quit`
+    ends the game (a quit at VSync(-1) was never seen)."""
+    game = Game("pause", frame=600)
+    try:
+        game.wait_paused()
+        client = game.connect()
+        frame, vblank = where(client.ask("info"))
+        assert frame >= 600, frame
+        assert where(client.ask("step 0")) == (frame, vblank)
+        time.sleep(1.0)
+        assert where(client.ask("info")) == (frame, vblank), "the paused game ran"
+        assert client.ask("quit") == "ok"
+        started = time.monotonic()
+        game.end()
+        assert time.monotonic() - started < 10, "quit took long to end a game that polls"
+    finally:
+        game.close()
+
+
 def main() -> int:
     if not EXE.is_file() or not DISC or not Path(DISC).is_file():
         print("control_paused_test: skipped: no game or no disc")
@@ -245,9 +271,10 @@ def main() -> int:
     frame, _ = paused_game()
     step_in_flight()
     quit_outside_vsync0()
+    quit_while_polling()
     print(f"control_paused_test: a paused game answered info, step 0 and peek at frame {frame}, held a step, "
           "dropped a client that left behind it, answered a step in flight with an err before the quit's ok, and "
-          "quit ended it, also from a wait outside VSync(0)")
+          "quit ended it, also from a wait outside VSync(0) and from a poll of VSync(-1)")
     return 0
 
 

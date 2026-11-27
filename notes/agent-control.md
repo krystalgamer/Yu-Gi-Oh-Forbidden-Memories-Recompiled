@@ -223,12 +223,26 @@ build with the old combination; the eight smoke cases unchanged.
   usual from there (what waited is served, then its steps and the rest).
   Checked headless on the real clock (`MEMORIES_CRASH_TEST=pause@60`, CTest
   `pc_control_paused`); the window's pause loop in `pace()` runs the same
-  function and is not run by that test. **Not served:** a pause where the
-  game polls `VSync(-1)` or `VSync(1)` (a movie's wait for sectors) instead of
-  waiting for a VBlank, on the real clock: the poll (`Platform_PollTime`) never
-  reaches the hook (`MEMORIES_CRASH_TEST=pause@600` headless: no answer), so
-  such a pause answers no one, a `quit` included (the virtual clock's polls
-  go through `pace()` and are served).
+  function and is not run by that test.
+- **A pause where the game polls:** a game that polls `VSync(-1)` or
+  `VSync(1)` instead of waiting for a VBlank (the intro movie's wait for
+  sectors; `MEMORIES_CRASH_TEST=pause@600` headless) never reached the hook
+  on the real clock: `Platform_PollTime` only ran the clock. Paused there it
+  answered no one, a `quit` included (`vsync` returns early for
+  `VSync(-1)`, before its exit), spun the game's thread at full speed (about
+  two cores' CPU time measured over 3 s) and, in a window, pumped no events
+  (only the waits and a present reach `Platform_PumpEvents`, none of which a
+  polling loop runs): a player's pause during the movie left the window
+  unresponsive too, by the code; no window run has checked it. At rate 0 the poll is now one more pass of the
+  pause's wait: after its `service()` (which takes a frame step's VBlank, so
+  stepping works as before), it pumps the window's events, serves the hook
+  and naps 0.5 ms (not while a step is waiting), and `VSync(-1)` ends in
+  `LibEtc_ExitIfQuit` at rate 0 as `VSync(1)` does. Other rates are
+  untouched (the clock, the VBlank count and determinism are those of a
+  game that is not paused); the virtual clock's polls already reach
+  `pace()` and its loop, so they are not served twice; a poll inside the
+  game's own interrupt code is not served. Checked by `pause@600` in
+  `pc_control_paused`.
 - **A quit while the game waits outside `VSync(0)`:** the wait ends at once and
   brings no VBlank, so a loop that waits for the count to move spun at full
   speed and never reached `VSync`'s exit (`VSync(n)`, `MemCardSync`,

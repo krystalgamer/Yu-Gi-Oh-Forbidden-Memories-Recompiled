@@ -843,11 +843,41 @@ static void pace(void)
     }
 }
 
+/* A poll at rate 0 on the real clock: the pause's wait, for a game that polls
+ * VSync(-1) or VSync(1) (a movie waiting for its sectors) instead of waiting
+ * for a VBlank, which pace()'s loop and wait_vblank never see. Without it such
+ * a pause spun the game's thread at full speed, pumped no window events (no
+ * close, no frame-step key, no repaint) and answered no control client. It does
+ * what those waits do, in their order: events, the paused hook, a short nap.
+ * Only here, at rate 0, after service() has taken a frame step's VBlank: the
+ * clock, the VBlank count and what the guest reads are those of every other
+ * rate, and the pause already froze time. Not under the virtual clock, whose
+ * polls reach pace() and its loop (serving twice would nap twice); not from a
+ * poll inside the game's own interrupt code (servicing), where the hook's
+ * reads would meet the guest in the middle of a handler. A quit is left to
+ * the caller (vsync: LibEtc_ExitIfQuit, which ends the process). */
+static void serve_paused_poll(void)
+{
+#ifndef _WIN32
+    struct timespec nap = {0, 500000};
+#endif
+    if (rate != 0 || servicing || Platform_ShouldQuit()) return;
+    Platform_PumpEvents();
+    if (paused_serve) paused_serve();
+    if (step_pending) return; /* the next poll's service() lets its VBlank through: no nap in its way */
+#ifdef _WIN32
+    Win32_Sleep(500); /* microseconds, as pace()'s pause loop: a client waits half a millisecond at most */
+#else
+    nanosleep(&nap, NULL);
+#endif
+}
+
 void Platform_PollTime(void)
 {
     sigset_t set, previous;
     if (!virtual_clock()) {
         service();
+        serve_paused_poll();
         return;
     }
     if (next_vblank && virtual_now + DETERMINISTIC_STEP >= next_vblank) pace();

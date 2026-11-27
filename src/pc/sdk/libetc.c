@@ -324,6 +324,12 @@ __attribute__((noinline)) static int vsync(int mode, void *caller)
     now = Platform_VBlankCount();
     Platform_VSyncHeartbeat();
     if (mode < 0) {
+        /* A paused game (rate 0) that polls this brings no VBlank for a
+         * wait to cut short, so a `quit` or a closed window would only be
+         * seen at the next VSync(0), which a paused game never reaches:
+         * it ends here, as VSync(1) and the waits do. Only at rate 0: at
+         * the others the poll returns as before (Platform_PollTime). */
+        if (Platform_ClockRate() == 0) LibEtc_ExitIfQuit();
         clock_gettime(CLOCK_MONOTONIC, &service_left);
         return (int)now;
     }

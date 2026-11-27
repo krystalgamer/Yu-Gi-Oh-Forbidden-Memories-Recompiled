@@ -234,7 +234,9 @@ void LibEtc_ExitIfQuit(void);
 void Platform_StopTimers(void);
 /* A VSync that does not wait (the running count): in a deterministic run it
  * lets 1 ms of game time pass, since a loop polling it is waiting for time
- * (movie playback waits for its strips that way). Nothing otherwise. */
+ * (movie playback waits for its strips that way). Nothing otherwise, except
+ * paused (rate 0) on the real clock: the pause's wait, as Platform_OnPaused
+ * says. */
 void Platform_PollTime(void);
 /* The game's code runs on the fixed game stack (state.h), and so does the
  * host code it calls: the clock's pass (advance, the tick and VBlank
@@ -311,7 +313,8 @@ void Platform_ControlHold(int held);
 void Platform_ControlIdle(void);
 /* The control channel's turn while the game is paused (rate 0): `serve` is
  * called, on the game's thread, from each pass of the pause's wait (the
- * clock's pause loop in pace(), and a wait for a VBlank that cannot come),
+ * clock's pause loop in pace(), a wait for a VBlank that cannot come, and a
+ * poll of VSync(-1) or VSync(1) on the real clock, Platform_PollTime),
  * after the window's events were pumped. It runs between two VBlanks, at no
  * state point, and must neither advance the clock nor change what the guest
  * sees (control.c, serve_paused, says what it does). NULL: none. */
