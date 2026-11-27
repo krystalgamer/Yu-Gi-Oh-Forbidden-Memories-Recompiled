@@ -31,7 +31,10 @@ Two more games:
     used to spin at full speed, never reaching VSync's exit).
 
 What this does not cover: a window's pause (the pause loop of pace(), which
-a headless game never runs), a frame step."""
+a headless game never runs), a frame step, and a pause where the game polls
+VSync(-1) or VSync(1) instead of waiting for a VBlank (on the real clock the
+poll does not reach the hook: a pause at frame 600 is not served, most likely
+the intro movie's wait for sectors)."""
 from __future__ import annotations
 
 import os
@@ -205,11 +208,11 @@ def paused_game() -> tuple[int, int]:
 def step_in_flight() -> None:
     """A client attached before the pause, with a step in flight: its quit is
     answered with the step's reply (an "err") first, then its own "ok"."""
-    game = Game("pause", frame=600)   # time for the client to attach and its step to be taken, whatever the load
+    game = Game("pause", frame=300)   # time for the client to attach and its step to be taken, whatever the load
     try:
         game.wait_for("control: listening on", "listened")
         client = game.connect()
-        client.send("step 100000")   # taken at the next VSync(0): far past frame 600
+        client.send("step 100000")   # taken at the next VSync(0): far past frame 300
         game.wait_paused()
         assert client.reply(1.0) is None, "a step in flight was answered while the game is paused"
         client.send("quit")

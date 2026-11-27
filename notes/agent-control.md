@@ -223,7 +223,12 @@ build with the old combination; the eight smoke cases unchanged.
   usual from there (what waited is served, then its steps and the rest).
   Checked headless on the real clock (`MEMORIES_CRASH_TEST=pause@60`, CTest
   `pc_control_paused`); the window's pause loop in `pace()` runs the same
-  function and is not run by that test.
+  function and is not run by that test. **Not served:** a pause where the
+  game polls `VSync(-1)` or `VSync(1)` (a movie's wait for sectors) instead of
+  waiting for a VBlank, on the real clock: the poll (`Platform_PollTime`) never
+  reaches the hook (`MEMORIES_CRASH_TEST=pause@600` headless: no answer), so
+  such a pause answers no one, a `quit` included (the virtual clock's polls
+  go through `pace()` and are served).
 - **A quit while the game waits outside `VSync(0)`:** the wait ends at once and
   brings no VBlank, so a loop that waits for the count to move spun at full
   speed and never reached `VSync`'s exit (`VSync(n)`, `MemCardSync`,
