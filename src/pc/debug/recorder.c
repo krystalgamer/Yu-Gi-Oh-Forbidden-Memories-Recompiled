@@ -4,6 +4,7 @@
 #include "replay_file.h"
 #include "control.h"
 #include "control_protocol.h"
+#include "notice_queue.h"
 #include "pc/debug/monitor.h"
 #include "pc/guest/state.h"
 #include "pc/platform/paths.h"
@@ -36,8 +37,7 @@ static int at_exit;
 static int player_record, player_play;
 static char zip_path[600];           /* recording: the .yfmreplay it becomes ("" for a plain one) */
 static volatile int start_asked;     /* Game > Record replay: at the next point */
-static char notice_title[64], notice_text[700];
-static volatile int notice_pending;
+static NoticeQueue notices; /* the game's thread only */
 static FILE *out;
 static char out_path[600];
 static unsigned states_every, last_state;
@@ -178,12 +178,15 @@ static void finish(void)
     out = NULL;
 }
 
+/* A notice for the player, queued behind the ones not shown yet (notice_queue.h):
+ * one that is a failure is never taken by a later one. */
 static void notify(const char *title, const char *format, const char *a, const char *b)
 {
-    snprintf(notice_title, sizeof(notice_title), "%s", title);
-    snprintf(notice_text, sizeof(notice_text), format, a ? a : "", b ? b : "");
-    notice_pending = 1;
-    fprintf(stderr, "memories-pc: replay: %s: %s\n", notice_title, notice_text);
+    char text[700];
+    snprintf(text, sizeof(text), format, a ? a : "", b ? b : "");
+    fprintf(stderr, "memories-pc: replay: %s: %s\n", title, text);
+    if (NoticeQueue_Push(&notices, title, text, strcmp(title, "Replay saved") != 0))
+        fprintf(stderr, "memories-pc: replay: too many notices are waiting: the oldest was dropped\n");
 }
 
 /* How a pack ended, told to the player: "Replay saved" (unless `quiet`: the
@@ -206,14 +209,44 @@ static void packs_ended(void)
         report_pack(file, got < 0, why, quiet);
 }
 
+/* How old a ".partial" or ".parts" must be (by its newest file) to be called a leftover at startup: long
+ * enough that no game still recording or packing is taken for dead, a recording that its game has
+ * paused for ten minutes included, short enough that a crash's leftovers (about 8 MB each) go at a start
+ * an hour later. */
+#define LEFTOVER_SECONDS 3600
+
 #define PACK_WAIT_MS 30000 /* about 150 ms on a disk that answers; a stuck one does not hold the exit for ever */
 
-void Recorder_FinishPacking(void)
+/* The wait's bound: MEMORIES_REPLAY_PACK_WAIT_MS (a test's knob: a pack that is held for longer than it
+ * is the one that never ends), else PACK_WAIT_MS. */
+static unsigned pack_wait_ms(void)
 {
-    if (!ReplayFile_PackWait(NULL, PACK_WAIT_MS))
-        fprintf(stderr, "memories-pc: replay: a replay is still being packed after %d s; going on without it\n",
-                PACK_WAIT_MS / 1000);
+    const char *text = getenv("MEMORIES_REPLAY_PACK_WAIT_MS");
+    unsigned long ms = text && *text ? strtoul(text, NULL, 10) : 0;
+    return ms ? (unsigned)ms : PACK_WAIT_MS;
+}
+
+/* MEMORIES_REPLAY_PACK_HOLD_MS (tests): every pack's thread sleeps this long before it starts reading, so that
+ * "a recording to the name of a pack that runs", "a quit while one runs" and "a wait that runs out" do not
+ * depend on how fast the zip is made. The time a pack takes is counted from after it. */
+static unsigned pack_hold_ms;
+
+static void hold_pack(const char *file)
+{
+    struct timespec span;
+    (void)file;
+    span.tv_sec = pack_hold_ms / 1000;
+    span.tv_nsec = (long)(pack_hold_ms % 1000) * 1000000L;
+    nanosleep(&span, NULL);
+}
+
+int Recorder_FinishPacking(void)
+{
+    unsigned wait = pack_wait_ms();
+    int done = ReplayFile_PackWait(NULL, wait);
+    if (!done) fprintf(stderr, "memories-pc: replay: a replay is still being packed after %u ms; going on without it\n", wait);
     packs_ended();
+    return done;
 }
 
 /* The E line and, for a player's recording, the start of its .yfmreplay's
@@ -340,6 +373,12 @@ void Recorder_Init(void)
     int boot_taken = ReplayFile_TakeNextRecord(boot, sizeof(boot));
     int next_taken = ReplayFile_TakeNext(next, sizeof(next));
     int boot_asked = !boot_taken;
+    const char *hold = getenv("MEMORIES_REPLAY_PACK_HOLD_MS");
+    if (hold && *hold && (pack_hold_ms = (unsigned)strtoul(hold, NULL, 10)) != 0) ReplayFile_SetPackHook(hold_pack);
+    /* What an earlier game left in replays/ (a pack cut off by a kill or a crash): not the file this start
+     * records to from its first frame, which has its own folder made below, and not what is fresh (a
+     * game that shares the folder). */
+    ReplayFile_RemoveLeftovers(boot_asked ? boot : NULL, LEFTOVER_SECONDS);
     if (next_taken == 0) {
         if (play && *play) fprintf(stderr, "memories-pc: replay: MEMORIES_PLAY is set: replays/next.txt is not played\n");
         else play = next;
@@ -767,9 +806,5 @@ void Recorder_BeforeRestart(void)
 int Recorder_TakeNotice(char *title, size_t title_size, char *text, size_t text_size)
 {
     packs_ended();
-    if (!notice_pending) return 0;
-    notice_pending = 0;
-    snprintf(title, title_size, "%s", notice_title);
-    snprintf(text, text_size, "%s", notice_text);
-    return 1;
+    return NoticeQueue_Take(&notices, title, title_size, text, text_size);
 }

@@ -458,9 +458,12 @@ static int handle(char *text)
             } else {
                 /* The pack runs on a thread of its own; the reply waits for
                  * it (the game is held here anyway), so the "ok" still means
-                 * the .yfmreplay is whole, as when it was packed here. */
-                Recorder_FinishPacking();
-                send_line("ok");
+                 * the .yfmreplay is whole, as when it was packed here. When
+                 * the wait runs out (a stuck disk) the recording is stopped
+                 * all the same, and the client is told the file is not
+                 * there yet, not that it is. */
+                if (Recorder_FinishPacking()) send_line("ok");
+                else send_error("recording stopped, but the replay is still being packed: the file appears when the pack ends");
             }
             return 0;
         }

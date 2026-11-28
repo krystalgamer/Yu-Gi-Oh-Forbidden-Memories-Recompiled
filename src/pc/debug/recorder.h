@@ -95,8 +95,12 @@ int Recorder_Stop(void);
  * way and tells how they ended. Stopping the game does it (atexit), and so does
  * anything that restarts it (Recorder_BeforeRestart); the control channel's
  * `record stop` does it before its "ok", so a client that gets the "ok" finds
- * the file whole. Main thread. */
-void Recorder_FinishPacking(void);
+ * the file whole. 1 when no pack runs now, 0 when the wait ran out (the pack
+ * goes on: `record stop` then answers "err ... still being packed"). Main
+ * thread. MEMORIES_REPLAY_PACK_WAIT_MS (ms) sets the bound and
+ * MEMORIES_REPLAY_PACK_HOLD_MS holds each pack's thread that long before it
+ * starts: for the tests. */
+int Recorder_FinishPacking(void);
 int Recorder_Recording(void);
 /* Game > Record replay: a new .yfmreplay in the user folder's replays/,
  * started at the next state point. Main thread. */

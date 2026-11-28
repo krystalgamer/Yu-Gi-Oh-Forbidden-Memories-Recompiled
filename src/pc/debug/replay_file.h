@@ -49,11 +49,15 @@ int ReplayFile_Finish(const char *file, char *why, size_t why_size);
  * or no free slot (a few packs run at once): the caller then packs with
  * ReplayFile_Finish, and the pack's own folder is the only one it touched. */
 int ReplayFile_PackStart(const char *file, unsigned long long recording_size, int quiet, char *why, size_t why_size);
+/* How many packs run at once: one more is refused (the caller packs it itself). */
+#define REPLAY_PACK_SLOTS 4
 /* One pack that has ended, taken (the game's thread only: it is joined): 1
  * saved, -1 not saved with why (its folder kept), 0 none ended. */
 int ReplayFile_PackTake(char *file, size_t file_size, int *quiet, char *why, size_t why_size);
 /* How many packs run (of `file`, or any when NULL; one ended and not yet
- * taken is not running). */
+ * taken is not running). A file is named by what it is, not by how it is
+ * spelled: "replays\A.yfmreplay" and "C:/u/replays/a.yfmreplay" are one file
+ * on Windows, "x/./a" and "x//a" and a link's two names everywhere. */
 int ReplayFile_PackRunning(const char *file);
 /* Waits for the packs of `file` (or any) to end, at most `timeout_ms`: 1 when
  * none runs now, 0 when the time is up. A pack that never ends leaves its
@@ -61,6 +65,18 @@ int ReplayFile_PackRunning(const char *file);
 int ReplayFile_PackWait(const char *file, unsigned timeout_ms);
 /* Tests: called by the pack's thread when it starts, before it reads anything. */
 void ReplayFile_SetPackHook(void (*hook)(const char *file));
+/* At startup: removes what a game that did not finish left in the user
+ * directory's replays/: "<name>.yfmreplay.partial" files and
+ * "<name>.yfmreplay.parts" folders (a pack cut off by a kill, a crash, an exit
+ * that gave up waiting, or a restart that came first), and nothing else: never
+ * a .yfmreplay, nothing outside replays/, no link and nothing that holds one
+ * (nothing is followed), not those of `keep` (the .yfmreplay this start is
+ * about to record, or NULL) nor of a pack of this process. Only what nothing
+ * has touched for `min_age_seconds`, the newest time in the folder counting:
+ * another game that shares the folder may be recording to one (its
+ * recording.txt grows at every frame) or packing one (its .partial grows) right
+ * now, and leaves it fresh. Returns how many it removed. */
+int ReplayFile_RemoveLeftovers(const char *keep, unsigned min_age_seconds);
 /* Removes the working folder of a recording that did not start (not one a
  * pack is reading). */
 void ReplayFile_Abandon(const char *file);

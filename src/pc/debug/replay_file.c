@@ -5,7 +5,9 @@
 #include "pc/mods/import.h"
 #include "pc/platform/paths.h"
 #include <dirent.h>
+#include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -13,6 +15,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <wchar.h>
+#include <wctype.h>
 #include <unistd.h> /* access, F_OK (compat/fs.h has it on Windows) */
 
 #define RECORDING_MAX (256ul << 20) /* about 50 hours of pad changes and frame hashes */
@@ -78,6 +82,128 @@ static int each_file(const char *directory, int (*each)(const char *path, const 
 static int work_folder(const char *file, char *out, size_t size)
 {
     return snprintf(out, size, "%s.parts", file) >= (int)size ? -1 : 0;
+}
+
+/* --- one file, however it is spelled ------------------------------------ */
+
+#ifdef _WIN32
+__declspec(dllimport) unsigned long __stdcall GetFullPathNameW(const wchar_t *, unsigned long, wchar_t *, wchar_t **);
+__declspec(dllimport) unsigned long __stdcall GetLongPathNameW(const wchar_t *, wchar_t *, unsigned long);
+#endif
+#define CANON_MAX 1300
+
+#ifndef _WIN32
+/* "/a//b/./c/../d" as "/a/b/d": a path that starts with "/", spelled one way. */
+static void flatten(char *path)
+{
+    char out[CANON_MAX];
+    size_t used = 0;
+    const char *at = path;
+    while (*at) {
+        size_t length;
+        while (*at == '/') at++;
+        length = strcspn(at, "/");
+        if (!length) break;
+        if (length == 1 && at[0] == '.') {
+            /* here */
+        } else if (length == 2 && at[0] == '.' && at[1] == '.') {
+            while (used && out[used - 1] != '/') used--;
+            if (used) used--;
+        } else {
+            out[used++] = '/';
+            memcpy(out + used, at, length);
+            used += length;
+        }
+        at += length;
+    }
+    if (!used) out[used++] = '/';
+    out[used] = '\0';
+    memcpy(path, out, used + 1);
+}
+#endif
+
+/* The file `path` names, as one string for comparing two names of it: absolute,
+ * without "." and "..", one kind of slash, and where it exists with its links
+ * followed (the longest part that exists is resolved: the file itself need not
+ * be there yet). Where the file system does not tell "A" from "a" (Windows,
+ * macOS) also in one case. On Windows the long name of an 8.3 short one, and
+ * the extended-length prefix taken off; a junction is not followed there (stat follows it, which is
+ * why nothing below removes through one). 0, or -1 when it is not a name or
+ * does not fit. */
+static int canonical_file(const char *path, char *out, size_t size)
+{
+    char work[CANON_MAX];
+#ifdef _WIN32
+    wchar_t *wide, full[CANON_MAX], head[CANON_MAX], longer[CANON_MAX];
+    char plain[CANON_MAX], *narrow;
+    unsigned long length;
+    size_t cut, i;
+    if (snprintf(plain, sizeof(plain), "%s", path) >= (int)sizeof(plain)) return -1;
+    for (i = 0; plain[i]; i++)
+        if (plain[i] == '\\') plain[i] = '/';
+    if (!strncmp(plain, "//?/UNC/", 8)) memmove(plain + 2, plain + 8, strlen(plain + 8) + 1);
+    else if (!strncmp(plain, "//?/", 4) || !strncmp(plain, "//./", 4)) memmove(plain, plain + 4, strlen(plain + 4) + 1);
+    if (!(wide = Memories_Utf8ToWide(plain))) return -1;
+    length = GetFullPathNameW(wide, CANON_MAX, full, NULL);
+    free(wide);
+    if (!length || length >= CANON_MAX) return -1;
+    /* A short name ("PROGRA~1") spells the same file as the long one: the longest part that exists. */
+    for (cut = wcslen(full); cut > 3;) {
+        memcpy(head, full, cut * sizeof(wchar_t));
+        head[cut] = 0;
+        length = GetLongPathNameW(head, longer, CANON_MAX);
+        if (length && length < CANON_MAX && length + wcslen(full + cut) < CANON_MAX) {
+            memcpy(longer + length, full + cut, (wcslen(full + cut) + 1) * sizeof(wchar_t));
+            memcpy(full, longer, (wcslen(longer) + 1) * sizeof(wchar_t));
+            break;
+        }
+        while (cut > 3 && full[cut - 1] != L'\\') cut--;
+        if (cut > 3) cut--;
+    }
+    for (i = 0; full[i]; i++) full[i] = (wchar_t)towlower(full[i] == L'\\' ? L'/' : full[i]);
+    if (!(narrow = Memories_WideToUtf8(full))) return -1;
+    length = (unsigned long)snprintf(work, sizeof(work), "%s", narrow);
+    free(narrow);
+    if (length >= sizeof(work)) return -1;
+#else
+    char whole[CANON_MAX];
+    size_t cut;
+    if (path[0] == '/') {
+        if (snprintf(whole, sizeof(whole), "%s", path) >= (int)sizeof(whole)) return -1;
+    } else {
+        char here[CANON_MAX];
+        if (!getcwd(here, sizeof(here)) || snprintf(whole, sizeof(whole), "%s/%s", here, path) >= (int)sizeof(whole))
+            return -1;
+    }
+    for (cut = strlen(whole);;) {
+        char head[CANON_MAX], *real;
+        memcpy(head, whole, cut);
+        head[cut] = '\0';
+        real = realpath(cut ? head : "/", NULL);
+        if (real) {
+            int fits = snprintf(work, sizeof(work), "%s/%s", real, whole + cut) < (int)sizeof(work);
+            free(real);
+            if (!fits) return -1;
+            break;
+        }
+        while (cut > 0 && whole[cut - 1] != '/') cut--;
+        while (cut > 0 && whole[cut - 1] == '/') cut--;
+    }
+    flatten(work);
+#ifdef __APPLE__
+    {
+        size_t i;
+        for (i = 0; work[i]; i++) work[i] = (char)tolower((unsigned char)work[i]);
+    }
+#endif
+#endif
+    return (size_t)snprintf(out, size, "%s", work) >= size ? -1 : 0;
+}
+
+/* The name to compare: the canonical one, or the text itself when it has none. */
+static void identity_of(const char *file, char *out, size_t size)
+{
+    if (canonical_file(file, out, size)) snprintf(out, size, "%s", file);
 }
 
 /* --- recording --------------------------------------------------------- */
@@ -356,7 +482,7 @@ int ReplayFile_Finish(const char *file, char *why, size_t why_size)
  * of its recording: no guest memory, no clock, no notice (the recorder
  * tells the player, on the game's thread, when it takes the result). */
 
-#define PACK_SLOTS 4
+#define PACK_SLOTS REPLAY_PACK_SLOTS
 enum { PACK_FREE, PACK_RUNNING, PACK_ENDED };
 
 static struct PackJob {
@@ -366,6 +492,7 @@ static struct PackJob {
     unsigned tenths; /* how long it took, in tenths of a millisecond */
     unsigned long long recording_size;
     char file[1100];
+    char canon[CANON_MAX]; /* identity_of(file): the name that decides which recording a pack is of */
     char why[400];
 } jobs[PACK_SLOTS];
 static void (*pack_hook)(const char *file);
@@ -421,6 +548,7 @@ int ReplayFile_PackStart(const char *file, unsigned long long recording_size, in
     }
     memset(job->why, 0, sizeof(job->why));
     snprintf(job->file, sizeof(job->file), "%s", file);
+    identity_of(file, job->canon, sizeof(job->canon));
     job->recording_size = recording_size;
     job->quiet = quiet;
     job->failed = 0;
@@ -468,11 +596,16 @@ int ReplayFile_PackTake(char *file, size_t file_size, int *quiet, char *why, siz
     return 0;
 }
 
+/* By identity (canonical_file), not by the text: "replays\A.yfmreplay" and "C:/u/replays/a.yfmreplay" are one
+ * file, and its folder is the pack's whichever way a new recording names it. */
 int ReplayFile_PackRunning(const char *file)
 {
+    char identity[CANON_MAX];
     int i, count = 0;
+    if (file) identity_of(file, identity, sizeof(identity));
     for (i = 0; i < PACK_SLOTS; i++) {
-        if (__atomic_load_n(&jobs[i].state, __ATOMIC_ACQUIRE) == PACK_RUNNING && (!file || !strcmp(file, jobs[i].file))) count++;
+        if (__atomic_load_n(&jobs[i].state, __ATOMIC_ACQUIRE) == PACK_RUNNING && (!file || !strcmp(identity, jobs[i].canon)))
+            count++;
     }
     return count;
 }
@@ -493,6 +626,95 @@ void ReplayFile_Abandon(const char *file)
     char work[1100];
     if (ReplayFile_PackRunning(file)) return; /* its folder is the pack's */
     if (!work_folder(file, work, sizeof(work)) && !access(work, F_OK)) Mods_ImportRemoveTree(work);
+}
+
+/* --- what a game that did not finish left -------------------------------- */
+
+/* The newest modification time of the files in `path` and below it (of `path` itself when it is a
+ * file, or a folder with none), or LLONG_MAX when it must be left alone: a link anywhere (nothing
+ * below follows one; Mods_ImportRemoveTree does, on Windows), something unreadable, or a tree deeper
+ * than a replay's folders ever are. A folder's own time says only when a name came or went in it:
+ * the files say when the recording or the zip was last written. */
+static long long newest_time(const char *path, int depth)
+{
+    struct stat info;
+    long long newest = -1;
+    DIR *listing;
+    struct dirent *entry;
+    if (depth > 5 || Mods_ImportIsLink(path) || stat(path, &info)) return LLONG_MAX;
+    if (!S_ISDIR(info.st_mode)) return (long long)info.st_mtime;
+    if (!(listing = opendir(path))) return LLONG_MAX;
+    while (newest != LLONG_MAX && (entry = readdir(listing))) {
+        char inner[1500];
+        long long other;
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (snprintf(inner, sizeof(inner), "%s/%s", path, entry->d_name) >= (int)sizeof(inner)) {
+            newest = LLONG_MAX;
+            break;
+        }
+        other = newest_time(inner, depth + 1);
+        if (other > newest) newest = other;
+    }
+    closedir(listing);
+    return newest < 0 ? (long long)info.st_mtime : newest;
+}
+
+/* Whether `name` ends in `suffix` (lower case), in any case: ReplayFile_Is does the same. */
+static int ends_with(const char *name, const char *suffix)
+{
+    size_t length = strlen(name), n = strlen(suffix), i;
+    if (length < n) return 0;
+    for (i = 0; i < n; i++) {
+        if (tolower((unsigned char)name[length - n + i]) != suffix[i]) return 0;
+    }
+    return 1;
+}
+
+int ReplayFile_RemoveLeftovers(const char *keep, unsigned min_age_seconds)
+{
+    static const char *const suffixes[2] = {".yfmreplay.partial", ".yfmreplay.parts"};
+    char folder[1100], kept[2][CANON_MAX];
+    DIR *listing;
+    struct dirent *entry;
+    long long now = (long long)time(NULL);
+    int removed = 0, i;
+    if (snprintf(folder, sizeof(folder), "%s/replays", Paths_UserDir()) >= (int)sizeof(folder) ||
+        !(listing = opendir(folder)))
+        return 0;
+    for (i = 0; i < 2; i++) {
+        char name[1200];
+        kept[i][0] = '\0';
+        /* "<keep>.partial" and "<keep>.parts": the suffixes without ".yfmreplay". */
+        if (keep && snprintf(name, sizeof(name), "%s%s", keep, suffixes[i] + 10) < (int)sizeof(name))
+            identity_of(name, kept[i], sizeof(kept[i]));
+    }
+    while ((entry = readdir(listing))) {
+        char path[1300], identity[CANON_MAX], file[1300];
+        long long newest;
+        size_t length;
+        int which = ends_with(entry->d_name, suffixes[0]) ? 0 : ends_with(entry->d_name, suffixes[1]) ? 1 : -1;
+        if (which < 0 || snprintf(path, sizeof(path), "%s/%s", folder, entry->d_name) >= (int)sizeof(path)) continue;
+        /* The recording this process is about to take over, and a pack of its own. */
+        identity_of(path, identity, sizeof(identity));
+        if (kept[which][0] && !strcmp(identity, kept[which])) continue;
+        length = strlen(path) - strlen(suffixes[which] + 10);
+        memcpy(file, path, length);
+        file[length] = '\0';
+        if (ReplayFile_PackRunning(file)) continue;
+        /* A plain file for the .partial, a folder for the .parts: nothing else of that name is touched. */
+        if (Mods_ImportIsLink(path) || (which == 0 ? !is_file(path) : !is_directory(path))) continue;
+        newest = newest_time(path, 0);
+        if (newest == LLONG_MAX || now - newest < (long long)min_age_seconds) continue;
+        if (which == 0 ? remove(path) : Mods_ImportRemoveTree(path)) {
+            fprintf(stderr, "memories-pc: replay: could not remove the leftover %s\n", path);
+            continue;
+        }
+        fprintf(stderr, "memories-pc: replay: removed %s, left by a recording that was never packed (%lld s old)\n", path,
+                now - newest);
+        removed++;
+    }
+    closedir(listing);
+    return removed;
 }
 
 /* --- playing ------------------------------------------------------------ */
