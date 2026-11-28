@@ -110,9 +110,6 @@ static int compare_export_name(const void *key, const void *entry)
     return strcmp(key, ((const MemoriesModExport *)entry)->name);
 }
 
-/* The ARM64 link already publishes relocated native symbols and retail
- * pins for code mods. A native export can be a function, so only the
- * translated runtime's registered globals supply a valid variable span. */
 static int find_arm64_variable(const char *name, uintptr_t *address,
                                uintptr_t *size, int *read_only)
 {
