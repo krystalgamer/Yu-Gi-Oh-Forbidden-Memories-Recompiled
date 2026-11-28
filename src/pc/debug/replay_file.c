@@ -1,5 +1,6 @@
 /* A player's replay as one file (replay_file.h). */
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE   /* realpath, under -std=c11 on glibc (mods.c asks the same) */
 #include "pc/compat/fs.h"
 #include "replay_file.h"
 #include "pc/mods/import.h"
