@@ -13,6 +13,11 @@
 #ifdef MEMORIES_TRANSLATED
 #include "pc/guest/translated_state_symbols.h"
 #endif
+#if defined(__APPLE__) && defined(MEMORIES_TRANSLATED)
+#include "control_protocol.h"
+#include "pc/guest/translated_runtime.h"
+#include "pc/mods/exports.h"
+#endif
 
 typedef struct RuntimeSymbol {
     uintptr_t address, size;
@@ -99,10 +104,51 @@ static void load_variables(const char *table)
     fclose(file);
 }
 
+#if defined(__APPLE__) && defined(MEMORIES_TRANSLATED)
+static int compare_export_name(const void *key, const void *entry)
+{
+    return strcmp(key, ((const MemoriesModExport *)entry)->name);
+}
+
+/* The ARM64 link already publishes relocated native symbols and retail
+ * pins for code mods. A native export can be a function, so only the
+ * translated runtime's registered globals supply a valid variable span. */
+static int find_arm64_variable(const char *name, uintptr_t *address,
+                               uintptr_t *size, int *read_only)
+{
+    const MemoriesModExport *entry = bsearch(name, Memories_ModExports,
+        Memories_ModExportCount, sizeof(*Memories_ModExports), compare_export_name);
+    size_t length;
+    unsigned flags;
+    int scratchpad;
+    uint32_t offset;
+    uintptr_t value;
+
+    if (!entry) return -1;
+    value = (uintptr_t)entry->address;
+    if (value && value <= UINT32_MAX &&
+        !ControlProtocol_GuestRange((uint32_t)value, 1, &scratchpad, &offset)) {
+        *address = value;
+        *size = 0;
+        if (read_only) *read_only = 0;
+        return 1;
+    }
+    if (!GuestRuntime_GlobalInfo(value, &length, &flags)) return -1;
+    *address = value;
+    *size = length;
+    if (read_only) *read_only = (flags & MEMORIES_REGION_CONSTANT) != 0;
+    return 0;
+}
+#endif
+
 int Symbols_FindVariable(const char *name, uintptr_t *address, uintptr_t *size, int *read_only)
 {
     size_t at;
+#if defined(__APPLE__) && defined(MEMORIES_TRANSLATED)
+    if (!variable_count) return find_arm64_variable(name, address, size, read_only);
+#else
     if (!variable_count) return -2;
+#endif
     for (at = 0; at < variable_count; at++) {
         if (!strcmp(variables[at].name, name)) {
             *address = variables[at].address;

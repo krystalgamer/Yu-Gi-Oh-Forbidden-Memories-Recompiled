@@ -448,6 +448,22 @@ void GuestRuntime_RegisterGlobal(void *host, size_t length, uint64_t identity, u
     }
     pthread_mutex_unlock(&registry_lock);
 }
+int GuestRuntime_GlobalInfo(uintptr_t host, size_t *length, unsigned *flags)
+{
+    int found = 0;
+    pthread_mutex_lock(&registry_lock);
+    unsigned position = host_place(host_order, region_count, host);
+    if (position < region_count) {
+        const GuestRuntimeRegion *region = &regions[host_order[position]];
+        if (region->host == host && (region->flags & MEMORIES_REGION_GLOBAL)) {
+            *length = region->length;
+            *flags = region->flags;
+            found = 1;
+        }
+    }
+    pthread_mutex_unlock(&registry_lock);
+    return found;
+}
 void GuestRuntime_RegisterAllocation(void *host, size_t length)
 {
     int slot;

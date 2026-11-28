@@ -29,6 +29,8 @@ typedef struct GuestRuntimeRegion {
     uint64_t identity;
 } GuestRuntimeRegion;
 void GuestRuntime_RegisterGlobal(void *host, size_t length, uint64_t identity, unsigned flags);
+/* Look up a registered global by its exact host address. */
+int GuestRuntime_GlobalInfo(uintptr_t host, size_t *length, unsigned *flags);
 /* Bytes of the token arena (where registered host data gets its guest
  * address) not taken yet: a code mod is refused rather than registered
  * past it, which aborts. Fragmentation may leave less in one piece. */
