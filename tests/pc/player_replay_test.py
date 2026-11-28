@@ -28,6 +28,13 @@ Headless, on the virtual clock, with SDL's dummy sound:
   6. A leftover marker is no order: replays/next-record.txt and next.txt of
      the older format (no time) or made long ago are dropped and removed, and
      nothing records or plays from them.
+  7. The .yfmreplay is packed on a thread of its own (notes/replays.md,
+     "Packing"). A recording that a host action ends (a control client's
+     `load`, which a player's replay cannot hold, as F8 ends one), whose
+     game is then asked to quit at once, is a whole file after the game
+     exits; so is one stopped and followed at once by a new recording, to
+     the same name and to another. The game's thread spends a few
+     milliseconds at each stop, a small part of what the pack takes.
 
 What this does not cover. MEMORIES_PLAY is the environment's way into the
 same unpack, progress folder and playback that File > Play replay... reaches
@@ -43,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -351,6 +359,89 @@ def record_at_run_time(work: Path) -> Path:
     return file
 
 
+def start_recording(game: yfm_control.Game, file: Path, refused_for: tuple[str, ...] = ()) -> int:
+    """`record file` at the next state point; how many tries were refused for one of `refused_for`
+    (a pack of that name still running)."""
+    waited = 0
+    for _ in range(400):
+        try:
+            game.command(f"record {file}")
+            return waited
+        except yfm_control.ControlError as refused:   # not a state point: the next one
+            reason = str(refused)
+            if any(text in reason for text in refused_for):
+                waited += 1
+            else:
+                assert "state point" in reason, refused
+            game.step(1)
+    raise AssertionError("the recording never started")
+
+
+def whole_replay(file: Path) -> list[str]:
+    """The .yfmreplay is a whole zip with its recording ended, and nothing of the pack is left beside it."""
+    assert file.is_file(), f"{file} was not made"
+    assert not Path(str(file) + ".partial").exists(), f"{file}.partial was left"
+    assert not Path(str(file) + ".parts").exists(), f"{file}.parts was left"
+    with zipfile.ZipFile(file) as archive:
+        assert archive.testzip() is None, f"{file} is damaged"
+        names = set(archive.namelist())
+        lines = archive.read("recording.txt").decode().splitlines()
+    for name in ("replay.json", "recording.txt", "start.state"):
+        assert name in names, f"{file} has no {name}: {sorted(names)}"
+    assert lines[-1].startswith("E ") and any(line.startswith("H ") for line in lines), lines[-2:]
+    return lines
+
+
+def stop_at_once(work: Path) -> None:
+    """The pack runs on its own thread: a recording a host action ends (the game's thread returns at once)
+    and the game then quits at once, or another recording starts at once, loses nothing."""
+    user = work / "stop-user"
+    first, second = work / "stop-a.yfmreplay", work / "stop-b.yfmreplay"
+    missing = work / "no-such.state"
+    game = yfm_control.Game(EXE, out=work / "stop", env={"MEMORIES_USER_DIR": str(user), "SDL_AUDIODRIVER": "dummy"},
+                            settings={"mod.3d-monsters": 0, "mod.hand-camera": 0})
+    waited = 0
+    try:
+        game.wait_until(lambda g: g.info()["frame"] >= 600, 3000, what="frame 600")
+
+        def end_by_host_action() -> None:
+            """A control client's load ends a player's recording before it (Recorder_HostAction): the same stop
+            as F8 but for the notice, with the pack handed to its thread. The load itself fails."""
+            try:
+                game.command(f"load {missing}")
+                raise AssertionError("a state that is not there was loaded")
+            except yfm_control.ControlError:
+                pass
+
+        start_recording(game, first)
+        game.step(100)
+        end_by_host_action()
+        # At once, to the same name: refused while the pack of it runs, taken the moment it is done.
+        waited = start_recording(game, first, refused_for=("still being packed",))
+        game.step(200)
+        end_by_host_action()
+        # At once, to another name.
+        start_recording(game, second)
+        game.step(120)
+        end_by_host_action()
+        game.quit()   # at once: the game must wait for the pack, not leave half a file
+    finally:
+        game.close()
+    log = (work / "stop" / "game.log").read_text(encoding="utf-8", errors="replace")
+    lines = whole_replay(first)
+    # The second recording to the name (200 VBlanks) is the file, not the first one (100).
+    assert int(lines[-1].split()[1]) >= 180, f"the file is not the second recording to its name: {lines[-1]}"
+    whole_replay(second)
+    stops = [float(ms) for ms in re.findall(r"record: stopped, ([0-9.]+) ms on the game's thread", log)]
+    packs = [float(ms) for ms in re.findall(r"replay: packed .* in ([0-9.]+) ms on a thread of its own", log)]
+    assert len(stops) == 3 and len(packs) == 3, f"expected 3 stops and 3 packs; see {work / 'stop' / 'game.log'}"
+    assert max(stops) < min(packs) / 2, f"the game's thread did not leave the pack to its own: {stops} against {packs}"
+    assert "could not be packed" not in log, "a pack failed"
+    print(f"player_replay_test: three stops at once handed to their threads ({waited} start(s) of the same name "
+          f"waited): game's thread {', '.join(f'{ms:.2f}' for ms in stops)} ms, packs on their own "
+          f"{', '.join(f'{ms:.0f}' for ms in packs)} ms; both files whole after the quit")
+
+
 def play_without_touching_the_saves(work: Path, file: Path) -> None:
     user = work / "listener"
     (user / "saves").mkdir(parents=True)
@@ -412,6 +503,7 @@ def main() -> int:
         boot_file = record_from_boot_item(work)
         play_from_boot_item(work, boot_file)
         file = record_at_run_time(work)
+        stop_at_once(work)
         play_without_touching_the_saves(work, file)
         refuse_commands(work, file)
         refuse_damaged_state(work, file)
