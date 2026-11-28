@@ -14,6 +14,7 @@ _Static_assert(sizeof(struct DIRENTRY)==40,"PS1 entry layout");
 static unsigned ticks;
 unsigned Platform_VBlankCount(void){return ticks;}
 void Platform_WaitVBlank(unsigned ignored){(void)ignored;ticks++;}
+void LibEtc_ExitIfQuit(void){}
 int Log_Wanted(LogChannel c){(void)c;return 0;}
 int Log_Enabled(LogChannel c){(void)c;return 0;}
 void Log_Printf(LogChannel c,const char*f,...){(void)c;(void)f;}

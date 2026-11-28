@@ -36,6 +36,8 @@ static volatile int pointer_set, pointer_x, pointer_y;   /* `pointer`: picture c
 static volatile unsigned pointer_buttons;
 static ControlLines lines;
 static char line[CONTROL_LINE_MAX + 1];
+static int line_held;     /* `line` is a command that waits for the game to run again (serve_paused) */
+static int long_owed;     /* "line too long" errors owed behind a step or a load still in flight (serve_paused) */
 static uint8_t data[CONTROL_DATA_MAX];
 static char reply[2 * CONTROL_DATA_MAX + 64];
 
@@ -111,7 +113,7 @@ static void attach(void)
 static void detach(const char *why)
 {
     ControlNet_Drop();
-    attached = running = owed = 0;
+    attached = running = owed = line_held = long_owed = 0;
     send_failed = pad2_set = 0;
     lines.used = lines.dropping = 0;
     pads[0] = pads[1] = 0; /* nothing held by a client that has gone */
@@ -185,6 +187,8 @@ static void wait_first(unsigned port)
     Platform_ControlHold(0);
 }
 
+static void serve_paused(void);
+
 static void start(void)
 {
     const char *port = getenv("MEMORIES_CONTROL");
@@ -202,6 +206,7 @@ static void start(void)
     channel = ON;
     fprintf(stderr, "memories-pc: control: listening on 127.0.0.1:%u\n", bound);
     wait_first(bound);
+    Platform_OnPaused(serve_paused); /* from the first VSync(0) on, with the channel up */
 }
 
 /* The guest bytes [address, address + length) in this process, or NULL. */
@@ -497,6 +502,16 @@ static int handle(char *text)
         }
         return 0;
     case CONTROL_QUIT:
+        /* One reply per command, in the commands' order: a step or a load
+         * still in flight (only a pause answers a quit before its reply,
+         * serve_paused) is told it was cut short before the quit's own "ok",
+         * or a client that pipelined them would read that "ok" as the
+         * step's. */
+        if (running || owed) send_error("the game quit before that command finished");
+        while (long_owed) { /* the over-long lines that came before the quit */
+            long_owed--;
+            send_error("line too long");
+        }
         send_line("ok");
         detach("the client asked to quit");
         Platform_RequestQuit(); /* VSync's own way out, right after this */
@@ -515,6 +530,15 @@ static int next_line(void)
         long count;
         int got;
         if (send_failed) return -1;
+        while (long_owed) { /* what serve_paused saw behind a step in flight, whose reply is out by now */
+            long_owed--;
+            send_error("line too long");
+            if (send_failed) return -1;
+        }
+        if (line_held) { /* the command serve_paused left: first, as it came */
+            line_held = 0;
+            return 1;
+        }
         got = ControlLines_Next(&lines, line);
         if (got > 0) return 1;
         if (got < 0) send_error("line too long");
@@ -565,4 +589,157 @@ void Control_Point(void)
         if (!got || handle(line)) break;
     }
     Platform_ControlHold(0);
+}
+
+/* The channel while the game is paused (rate 0: a player's pause, or the end
+ * of a replay's play in a window; platform.h, Platform_OnPaused). The game
+ * waits there inside a frame, between two VBlanks and at no state point, so
+ * Control_Point (end of VSync(0), the one place the state is whole) is not
+ * reached, and a client's commands went unanswered for as long as the pause
+ * lasted. What this does, and why it changes nothing the guest sees:
+ *
+ *  - It accepts a client, as Control_Point does, and refuses others. The
+ *    client is attached from then on (the watchdog off; Platform_ControlAttach
+ *    reads no clock and moves no VBlank), but the game is not held or run:
+ *    the pause is still the player's, and the game goes on when they end it,
+ *    to its next Control_Point, where everything below that waited is served
+ *    in order.
+ *  - It answers only commands that read the game and leave it alone: `info`,
+ *    `step 0` (where the game stands), `peek` (what the guest holds now; at
+ *    this point, not at a state point, so the bytes of a frame in progress),
+ *    and `quit` (the one way out for a script, which Control_Point serves
+ *    too: it asks the game to close, and the pause loop ends on it). A line
+ *    that does not parse is answered too: "err" touches nothing.
+ *  - Every other command is queued, as when the game is running: pad,
+ *    pointer, wheel and key would reach the guest between VBlanks (and a
+ *    recording takes them at its VBlank points), step, jump, poke, load,
+ *    save, record and shot need a state point or run the game, and hash reads
+ *    the picture the GPU has not finished. The queue is in order: the first
+ *    command that waits holds back the ones behind it, so replies keep the
+ *    order of the commands, which is all a client that waits for each reply
+ *    sees (a pipelined `quit` behind a waiting `step` waits too).
+ *  - A step in flight (`running`, or a reply `owed`) is the client's own and
+ *    has no reply yet, so only `quit` is answered meanwhile, and it ends the
+ *    step: the step's reply is an "err" (the game quit before it finished),
+ *    then the quit's "ok" (handle), so the replies stay one per command, in
+ *    order. A line over the size limit is a command too: seen behind a step in
+ *    flight, its "err line too long" is owed (long_owed) and goes out after the
+ *    step's reply, before whatever follows (handle's quit, or next_line when
+ *    the game runs), as Control_Point, which reads nothing during a step,
+ *    has always answered it.
+ *  - A client that waits is still watched: while a command is held, what the
+ *    client sends goes into the line buffer unparsed (it is read when the game
+ *    runs, after the held command), so that a client that closes is seen at
+ *    once, as the read that finds the end. Peeking a byte (ControlNet_Gone)
+ *    would say "not gone" while unread bytes wait, and a client that sent
+ *    `step 1`, then `quit`, then closed would hold the channel for the whole
+ *    pause, with every new client told "busy". Only a full buffer falls back
+ *    to the peek.
+ *  - A frame step (rate 0 plus the Step key) ends the pause's wait for one
+ *    VBlank, whoever is attached: that VBlank and its Control_Point run as
+ *    they do without this. Nothing here runs the clock, a VBlank handler or
+ *    guest code, so the stepped game is the one it was without a client.
+ *    The pause is the player's until that Control_Point: after a frame step
+ *    the game has run one frame, and what waited is served there, in order.
+ *    A client's own `step N` taken there still needs N VBlanks, and the pause
+ *    brings none (rate 0 on the real clock): the player's pause wins, and the
+ *    step waits until they end it (or is answered with an err on a quit).
+ * Reentrancy: the reply's idle callback pumps the window, never a wait. */
+static int answerable_paused(const char *text)
+{
+    ControlCommand command;
+    char probe[CONTROL_LINE_MAX + 1], error[160];
+    int bad;
+    snprintf(probe, sizeof(probe), "%s", text); /* the parser cuts its argument up */
+    bad = ControlProtocol_Parse(probe, &command, data, error, sizeof(error));
+    if (running || owed) return !bad && command.kind == CONTROL_QUIT;
+    if (bad) return 1;
+    switch (command.kind) {
+    case CONTROL_INFO:
+    case CONTROL_PEEK:
+    case CONTROL_QUIT:
+        return 1;
+    case CONTROL_STEP:
+        return !command.count;
+    default:
+        return 0;
+    }
+}
+
+/* A command waits (line_held): read what the client sends on, unparsed, into
+ * the line buffer, so that its close is seen (see serve_paused). */
+static void watch_held(void)
+{
+    for (;;) {
+        size_t room;
+        char *at = ControlLines_Room(&lines, &room);
+        long count;
+        if (!room) { /* nothing more can be kept: the peek is what is left */
+            if (ControlNet_Gone()) detach("the client left while the game is paused");
+            return;
+        }
+        count = ControlNet_Receive(at, room, 0);
+        if (count < 0) {
+            detach("the client left while the game is paused");
+            return;
+        }
+        if (!count) return;
+        ControlLines_Added(&lines, (size_t)count);
+    }
+}
+
+static void serve_paused(void)
+{
+    static int serving;
+    if (channel != ON || serving) return;
+    serving = 1;
+    if (!attached) {
+        if (!ControlNet_Accept(0)) {
+            serving = 0;
+            return;
+        }
+        attach();
+    }
+    while (!line_held) {
+        size_t room;
+        char *at;
+        long count;
+        int got;
+        if (send_failed) {
+            detach("the client stopped reading while the game is paused");
+            break;
+        }
+        got = ControlLines_Next(&lines, line);
+        if (got < 0) {
+            /* A reply per command, in order: with a step or a load in flight
+             * its reply comes first, as Control_Point (which reads nothing
+             * while a step runs) would have it, so the error is owed until
+             * the game runs (next_line) or the quit that cuts that step short
+             * (handle). Reading goes on: a quit behind it still ends the pause. */
+            if (running || owed) long_owed++;
+            else send_error("line too long");
+            continue;
+        }
+        if (got > 0) {
+            if (!answerable_paused(line)) {
+                line_held = 1;
+            } else if (handle(line)) {
+                break; /* quit */
+            }
+            continue;
+        }
+        at = ControlLines_Room(&lines, &room);
+        count = ControlNet_Receive(at, room, 0);
+        if (count < 0) {
+            detach("the client left while the game is paused");
+            break;
+        }
+        if (!count) break;
+        ControlLines_Added(&lines, (size_t)count);
+    }
+    if (attached && line_held) watch_held();
+    /* After the reads, so that a client that has closed is seen first and a
+     * new one that came at once is taken on the next pass, not turned away. */
+    ControlNet_RefuseOthers("err busy: another client is attached\n");
+    serving = 0;
 }

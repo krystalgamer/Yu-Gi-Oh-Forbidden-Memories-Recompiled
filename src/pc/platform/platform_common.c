@@ -552,6 +552,13 @@ void Platform_ControlIdle(void)
 #endif
 }
 
+static void (*paused_serve)(void);
+
+void Platform_OnPaused(void (*serve)(void))
+{
+    paused_serve = serve;
+}
+
 void Platform_ControlHold(int held)
 {
     sigset_t set, previous;
@@ -805,9 +812,12 @@ static void pace(void)
     while (rate == 0 && !step_pending && !Platform_ShouldQuit()) {
         deterministic_last_wait = now_us(); /* waiting, not spinning (advance) */
         Platform_PumpEvents();
+        /* The channel's turn, not the game's: a frame step still ends this
+         * loop (above) and its one VBlank runs as without a client. */
+        if (paused_serve) paused_serve();
 #ifdef _WIN32
         Win32_Heartbeat(); /* paused, not hung */
-        Win32_Sleep(500);
+        Win32_Sleep(500); /* microseconds: a client waits half a millisecond at most */
 #else
         nanosleep(&nap, NULL);
 #endif
@@ -833,11 +843,42 @@ static void pace(void)
     }
 }
 
+/* A poll at rate 0 on the real clock: the pause's wait, for a game that polls
+ * VSync(-1) or VSync(1) (a movie waiting for its sectors) instead of waiting
+ * for a VBlank, which pace()'s loop and wait_vblank never see. Without it such
+ * a pause spun the game's thread at full speed, pumped no window events (no
+ * close, no frame-step key, no repaint) and answered no control client. It does
+ * what those waits do, in their order: events, the paused hook, a short nap.
+ * Only here, at rate 0, after service() has taken a frame step's VBlank: the
+ * clock, the VBlank count and what the guest reads are those of every other
+ * rate, and the pause already froze time. Not under the virtual clock, whose
+ * polls reach pace() and its loop (serving twice would nap twice); not from a
+ * poll inside the game's own interrupt code (servicing under the cooperative
+ * clock, ticking under the interrupt clock's tick handler), where the hook's
+ * reads would meet the guest in the middle of a handler. A quit is left to
+ * the caller (vsync: LibEtc_ExitIfQuit, which ends the process). */
+static void serve_paused_poll(void)
+{
+#ifndef _WIN32
+    struct timespec nap = {0, 500000};
+#endif
+    if (rate != 0 || servicing || ticking || Platform_ShouldQuit()) return;
+    Platform_PumpEvents();
+    if (paused_serve) paused_serve();
+    if (step_pending) return; /* the next poll's service() lets its VBlank through: no nap in its way */
+#ifdef _WIN32
+    Win32_Sleep(500); /* microseconds, as pace()'s pause loop: a client waits half a millisecond at most */
+#else
+    nanosleep(&nap, NULL);
+#endif
+}
+
 void Platform_PollTime(void)
 {
     sigset_t set, previous;
     if (!virtual_clock()) {
         service();
+        serve_paused_poll();
         return;
     }
     if (next_vblank && virtual_now + DETERMINISTIC_STEP >= next_vblank) pace();
@@ -949,7 +990,10 @@ __attribute__((noinline)) static void wait_vblank(unsigned count_at_entry)
         } else {
             service();
             if (vblank_count != count_at_entry) break;
-            if (rate == 0) Platform_PumpEvents();
+            if (rate == 0) {
+                Platform_PumpEvents();
+                if (paused_serve) paused_serve(); /* a frame step ended this wait above, with its VBlank */
+            }
 #ifdef _WIN32
             if (rate == 0) Win32_Heartbeat(); /* paused, not hung */
             Win32_ServiceInterrupt();

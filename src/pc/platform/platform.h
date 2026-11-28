@@ -222,14 +222,21 @@ int Platform_ScriptedPad2(void);
  *    the backend presents without blocking and the cap alone limits presents.
  */
 int Platform_StartTimers(void (*tick)(uint64_t game_us, uint64_t real_us), void (*vblank)(void));
-/* Wait while the VBlank count still equals `count` (the caller's count at entry). */
+/* Wait while the VBlank count still equals `count` (the caller's count at entry).
+ * Once Platform_ShouldQuit is set it returns at once and brings no VBlank: a
+ * loop that waits for the count to move calls LibEtc_ExitIfQuit after it. */
 void Platform_WaitVBlank(unsigned count);
+/* The shutdown a quit ends in (timers, the mods' hooks, exit(0)); returns
+ * when no quit was asked. VSync's, and every wait loop's way out of one. */
+void LibEtc_ExitIfQuit(void);
 /* No more ticks or VBlanks: called before the game exits, so that none
  * interrupts the C runtime while it shuts down. */
 void Platform_StopTimers(void);
 /* A VSync that does not wait (the running count): in a deterministic run it
  * lets 1 ms of game time pass, since a loop polling it is waiting for time
- * (movie playback waits for its strips that way). Nothing otherwise. */
+ * (movie playback waits for its strips that way). Nothing otherwise, except
+ * paused (rate 0) on the real clock: the pause's wait, as Platform_OnPaused
+ * says. */
 void Platform_PollTime(void);
 /* The game's code runs on the fixed game stack (state.h), and so does the
  * host code it calls: the clock's pass (advance, the tick and VBlank
@@ -304,6 +311,14 @@ void Platform_ControlHold(int held);
 /* Waiting for a client before one is attached (the watchdog still on):
  * a heartbeat for the freeze watches. */
 void Platform_ControlIdle(void);
+/* The control channel's turn while the game is paused (rate 0): `serve` is
+ * called, on the game's thread, from each pass of the pause's wait (the
+ * clock's pause loop in pace(), a wait for a VBlank that cannot come, and a
+ * poll of VSync(-1) or VSync(1) on the real clock, Platform_PollTime),
+ * after the window's events were pumped. It runs between two VBlanks, at no
+ * state point, and must neither advance the clock nor change what the guest
+ * sees (control.c, serve_paused, says what it does). NULL: none. */
+void Platform_OnPaused(void (*serve)(void));
 /* The virtual clock runs (MEMORIES_DETERMINISTIC=1, or the frame-dump
  * combination): what a recording needs to be played back. */
 int Platform_VirtualClock(void);

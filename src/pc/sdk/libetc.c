@@ -267,6 +267,26 @@ int VSyncCallback(void (*callback)(void))
 #define VSYNC_POLL_SCRUB_BYTES (8u * 1024u)
 static int vsync(int mode, void *caller);
 
+/* The process's way out once the window is closed or a control client said
+ * `quit` (Platform_ShouldQuit): VSync's, and the one every wait that quit
+ * cuts short goes to. Platform_WaitVBlank returns at once from then on and
+ * brings no VBlank, so a loop that waits for the count to move (VSync(n),
+ * MemCardSync, Graphics_SyncFrame) would spin at full speed for ever; each
+ * calls this after the wait instead. The shutdown is what VSync always did,
+ * not shortened: timers first, then the mods' hooks. Nothing the guest
+ * does before a quit changes; the clock does not run on to bring the
+ * VBlanks, as a paused game's would not either (rate 0). */
+void LibEtc_ExitIfQuit(void)
+{
+    if (!Platform_ShouldQuit()) return;
+    Monitor_Shared()->exiting = 1; /* a slow shutdown is not a freeze */
+    /* The clock first: VBlank can hand a mod an INPUT event, and after
+     * its shutdown hook the memory that callback uses may be gone. */
+    Platform_StopTimers();
+    Mods_Shutdown(); /* mods get a word in before the process goes */
+    exit(0);
+}
+
 int Memories_VSync(int mode)
 {
     int result = vsync(mode, __builtin_return_address(0));
@@ -304,6 +324,12 @@ __attribute__((noinline)) static int vsync(int mode, void *caller)
     now = Platform_VBlankCount();
     Platform_VSyncHeartbeat();
     if (mode < 0) {
+        /* A paused game (rate 0) that polls this brings no VBlank for a
+         * wait to cut short, so a `quit` or a closed window would only be
+         * seen at the next VSync(0), which a paused game never reaches:
+         * it ends here, as VSync(1) and the waits do. Only at rate 0: at
+         * the others the poll returns as before (Platform_PollTime). */
+        if (Platform_ClockRate() == 0) LibEtc_ExitIfQuit();
         clock_gettime(CLOCK_MONOTONIC, &service_left);
         return (int)now;
     }
@@ -405,7 +431,12 @@ __attribute__((noinline)) static int vsync(int mode, void *caller)
         Recorder_Point(Memories_PresentedFrames()); /* MEMORIES_RECORD, MEMORIES_PLAY */
         Control_Point(); /* MEMORIES_CONTROL: the client's turn, at the same point */
     } else if (mode > 1) {
-        while (Platform_VBlankCount() - last_vsync < (unsigned)mode) {
+        /* A wait that quit cuts short brings no VBlank: without the second
+         * test this spun at full speed from the quit on, never reaching the
+         * exit below (a pause outside VSync(0)'s own wait, then `quit` or a
+         * closed window). Platform_WaitVBlank's other callers end the same
+         * way, through LibEtc_ExitIfQuit. */
+        while (Platform_VBlankCount() - last_vsync < (unsigned)mode && !Platform_ShouldQuit()) {
             Platform_WaitVBlank(Platform_VBlankCount());
         }
     }
@@ -413,14 +444,7 @@ __attribute__((noinline)) static int vsync(int mode, void *caller)
     if (mode != 1) {
         last_vsync = Platform_VBlankCount();
     }
-    if (Platform_ShouldQuit()) {
-        Monitor_Shared()->exiting = 1; /* a slow shutdown is not a freeze */
-        /* The clock first: VBlank can hand a mod an INPUT event, and after
-         * its shutdown hook the memory that callback uses may be gone. */
-        Platform_StopTimers();
-        Mods_Shutdown(); /* mods get a word in before the process goes */
-        exit(0);
-    }
+    LibEtc_ExitIfQuit();
     clock_gettime(CLOCK_MONOTONIC, &service_left);
     if (mode == 1) return AiTrace_VSync1((int)(elapsed * 263u), caller);
     return (int)(elapsed * 263u);

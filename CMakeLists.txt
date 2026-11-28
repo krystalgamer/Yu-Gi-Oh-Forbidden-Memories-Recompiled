@@ -1454,6 +1454,13 @@ if(Python3_Interpreter_FOUND)
             COMMAND "${Python3_EXECUTABLE}" tests/pc/player_replay_test.py
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
         set_tests_properties(pc_player_replay PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
+        # A control client is answered while the game is paused: info, step 0, peek
+        # and quit; the rest waits (notes/agent-control.md). Needs the game and
+        # MEMORIES_DISC; skipped without them, as on CI.
+        add_test(NAME pc_control_paused
+            COMMAND "${Python3_EXECUTABLE}" tests/pc/control_paused_test.py
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(pc_control_paused PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
         # yfm_control.py's replies against a made-up game: slow, closed, hung
         # (notes/agent-control.md).
         add_test(NAME pc_control_client

@@ -199,6 +199,61 @@ build with the old combination; the eight smoke cases unchanged.
   deterministic run, and a 3 s wait between two steps changes nothing.
   `MEMORIES_CLOCK=interrupt` keeps its timer running while the client holds
   the game (logged); lockstep needs the default cooperative clock.
+- **While the game is paused** (rate 0: a player's pause, the end of a
+  windowed play): the game waits inside a frame, not at a `Control_Point`,
+  and used to answer no one for as long as the pause lasted. Now its wait
+  calls `serve_paused` (`Platform_OnPaused`), which takes a client (as
+  `Control_Point` does) and answers, in order, `info`, `step 0`, `peek`,
+  `quit` and a line that does not parse: they read the game or ask it to
+  close, and run no clock, VBlank or guest code. Everything else (`pad`,
+  `pointer`, `wheel`, `key`, `step N`, `poke`, `jump`, `load`, `save`,
+  `shot`, `hash`, `record`...) waits queued until the game runs again, and
+  the first of them holds back the ones behind it, so replies stay in the
+  commands' order; a client attached before the pause, with a step in
+  flight, is answered `quit` only, and that ends the step: the step's
+  reply comes first, as `err the game quit before that command finished`,
+  then the quit's `ok` (one reply per command, in order); a line over the
+  size limit behind that step is a command too, its `err line too long`
+  goes out after the step's reply and before the quit's `ok`. While a command
+  waits, what the client sends goes on being read (unparsed, into the line
+  buffer, served when the game runs), so a client that closes is dropped at
+  once and the next one is taken, whatever it had sent behind the waiting
+  command; only a full buffer falls back to peeking one byte. The pause is
+  the player's until the next `Control_Point`: attaching does not end it and
+  a frame step ends the wait for one VBlank as it does without a client; what
+  waited is served at that `Control_Point`, in order. The player's pause
+  wins there too: at rate 0 on the real clock a client's `step N` taken at
+  that point still needs N VBlanks and the pause brings none, so it waits
+  until the player ends the pause (or is answered with an err on a quit).
+  Checked headless on the real clock (`MEMORIES_CRASH_TEST=pause@60`, CTest
+  `pc_control_paused`); the window's pause loop in `pace()` runs the same
+  function and is not run by that test.
+- **A pause where the game polls:** a game that polls `VSync(-1)` or
+  `VSync(1)` instead of waiting for a VBlank (the intro movie's wait for
+  sectors; `MEMORIES_CRASH_TEST=pause@600` headless) never reached the hook
+  on the real clock: `Platform_PollTime` only ran the clock. Paused there it
+  answered no one, a `quit` included (`vsync` returns early for
+  `VSync(-1)`, before its exit), spun the game's thread at full speed (about
+  two cores' CPU time measured over 3 s) and, in a window, pumped no events
+  (only the waits and a present reach `Platform_PumpEvents`, none of which a
+  polling loop runs): a player's pause during the movie left the window
+  unresponsive too, by the code; no window run has checked it. At rate 0 the poll is now one more pass of the
+  pause's wait: after its `service()` (which takes a frame step's VBlank, so
+  stepping works as before), it pumps the window's events, serves the hook
+  and naps 0.5 ms (not while a step is waiting), and `VSync(-1)` ends in
+  `LibEtc_ExitIfQuit` at rate 0 as `VSync(1)` does. Other rates are
+  untouched (the clock, the VBlank count and determinism are those of a
+  game that is not paused); the virtual clock's polls already reach
+  `pace()` and its loop, so they are not served twice; a poll inside the
+  game's own interrupt code is not served. Checked by `pause@600` in
+  `pc_control_paused`.
+- **A quit while the game waits outside `VSync(0)`:** the wait ends at once and
+  brings no VBlank, so a loop that waits for the count to move spun at full
+  speed and never reached `VSync`'s exit (`VSync(n)`, `MemCardSync`,
+  `Graphics_SyncFrame`; it came with closing the window too). They now end
+  through `LibEtc_ExitIfQuit`, the shutdown `VSync` always did (timers, then
+  the mods' hooks). Checked by `MEMORIES_CRASH_TEST=pausewait@60` (CTest
+  `pc_control_paused` too).
 - **Cost:** with `MEMORIES_CONTROL` unset, `Control_Point` returns at its
   first test and the pads it adds are 0. The eight smoke cases pass, and
   7000 frame hashes of a run without it equal the origin/master build's.
@@ -299,8 +354,9 @@ replay can begin at a state.
 - **Play:** `MEMORIES_PLAY=path` gives the pads the file's bits (the live
   ones are ignored) and ends the game at its `E`; a player's `.yfmreplay`
   in a window pauses there instead (notes/replays.md), unless
-  `MEMORIES_CONTROL` is set, so a client is never left waiting on a pause
-  that does not serve the channel. A mod's `host->pad`
+  `MEMORIES_CONTROL` is set: a script that plays a replay waits for the game
+  to end, which a pause would not (the pause answers `info` and `quit` now,
+  but is no end). A mod's `host->pad`
   reads the played bits too (`Mods_PadSource`): it used to read the
   keyboard directly, so the hand camera's L1 was lost in a play. It now
   also sees a control client's bits, which it did not.

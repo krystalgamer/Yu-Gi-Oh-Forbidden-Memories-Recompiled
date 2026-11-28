@@ -289,6 +289,7 @@ PSXLONG MemCardSync(PSXLONG mode, PSXLONG *command, PSXLONG *result)
             return 0;
         }
         Platform_WaitVBlank(Platform_VBlankCount());
+        LibEtc_ExitIfQuit(); /* a quit brings no VBlank: this would spin (VSync, libetc.c) */
     }
     pending = 0;
     if (command) {

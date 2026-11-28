@@ -507,8 +507,9 @@ void Recorder_Point(unsigned frame)
     /* The end: its VBlank and its frame (a game closed between two VBlanks
      * presents twice in the last one). A player's replay in a window pauses
      * there, and offers the way back; any other play ends the game, as does
-     * one with a control client (MEMORIES_CONTROL), which the pause would
-     * leave unanswered. A restart drops MEMORIES_CONTROL (Platform_RestartGame),
+     * one with a control client (MEMORIES_CONTROL): a script that plays a
+     * replay waits for the game to end, and a pause (which answers a client's
+     * info and quit, control.c) is no end. A restart drops MEMORIES_CONTROL (Platform_RestartGame),
      * so File > Play replay... keeps its pause, unless a scripted check
      * puts the variable back through MEMORIES_RESTART_ENV: then it expects
      * a client and the play ends the game. The rule keys on the variable and
