@@ -35,6 +35,9 @@
 #include <unistd.h>
 #include <utime.h>
 #include "scratch.h"
+#ifdef _WIN32
+#include <wchar.h>
+#endif
 
 static int failures;
 #define CHECK(condition)                                                                                               \
@@ -54,6 +57,53 @@ static void nap(long milliseconds)
     struct timespec span = {milliseconds / 1000, (milliseconds % 1000) * 1000000L};
     nanosleep(&span, NULL);
 }
+
+/* chdir, getcwd and utime on a UTF-8 path: the narrow Windows calls read it in the ANSI code page, which
+ * a folder with accents and symbols in its name (tools/pc/test_path_layout.py makes the whole run's
+ * temporary folder one) does not survive. */
+#ifdef _WIN32
+static int change_dir(const char *path)
+{
+    wchar_t *wide = Memories_Utf8ToWide(path);
+    int result = wide ? _wchdir(wide) : -1;
+    free(wide);
+    return result;
+}
+
+static int current_dir(char *out, size_t size)
+{
+    wchar_t wide[1100];
+    char *narrow;
+    int ok;
+    if (!_wgetcwd(wide, sizeof(wide) / sizeof(wide[0])) || !(narrow = Memories_WideToUtf8(wide))) return -1;
+    ok = strlen(narrow) < size;
+    if (ok) memcpy(out, narrow, strlen(narrow) + 1);
+    free(narrow);
+    return ok ? 0 : -1;
+}
+
+static int set_times(const char *path, time_t when)
+{
+    struct _utimbuf times;
+    wchar_t *wide = Memories_Utf8ToWide(path);
+    int result;
+    times.actime = times.modtime = when;
+    result = wide ? _wutime(wide, &times) : -1;
+    free(wide);
+    return result;
+}
+#else
+static int change_dir(const char *path) { return chdir(path); }
+
+static int current_dir(char *out, size_t size) { return getcwd(out, size) ? 0 : -1; }
+
+static int set_times(const char *path, time_t when)
+{
+    struct utimbuf times;
+    times.actime = times.modtime = when;
+    return utime(path, &times);
+}
+#endif
 
 static void hold(const char *file)
 {
@@ -360,17 +410,17 @@ static void other_spellings_of_a_file(void)
     in_here = n;
     snprintf(spellings[n++], sizeof(spellings[0]), "spell.yfmreplay");
     snprintf(spellings[n++], sizeof(spellings[0]), "./spell.yfmreplay");
-    CHECK(getcwd(here, sizeof(here)) != NULL);
+    CHECK(!current_dir(here, sizeof(here)));
     for (i = 0; i < n; i++) {
         const char *name = spellings[i];
-        if ((int)i >= in_here) CHECK(!chdir(root));
+        if ((int)i >= in_here) CHECK(!change_dir(root));
         CHECK(ReplayFile_PackRunning(name) == 1);
         CHECK(ReplayFile_Begin(name, recording, sizeof(recording), state, sizeof(state), why, sizeof(why)) == -1);
         CHECK(strstr(why, "still being packed") != NULL);
         CHECK(ReplayFile_PackStart(name, recording_size, 0, why, sizeof(why)) == -1);
         CHECK(ReplayFile_Finish(name, why, sizeof(why)) == -1);
         ReplayFile_Abandon(name);
-        if ((int)i >= in_here) CHECK(!chdir(here));
+        if ((int)i >= in_here) CHECK(!change_dir(here));
     }
     {
         char parts[1200];
@@ -395,9 +445,7 @@ static void other_spellings_of_a_file(void)
 
 static void age(const char *path, long seconds)
 {
-    struct utimbuf times;
-    times.actime = times.modtime = time(NULL) - seconds;
-    if (utime(path, &times)) {
+    if (set_times(path, time(NULL) - seconds)) {
         fprintf(stderr, "cannot age %s\n", path);
         failures++;
     }
@@ -438,16 +486,20 @@ static void drop_link(const char *link)
 static int make_link(const char *link, const char *target)
 {
 #ifdef _WIN32
-    char command[3000], from[1400], to[1400];
+    /* _wsystem: a narrow command line is read in the ANSI code page (see change_dir). */
+    wchar_t *a = Memories_Utf8ToWide(link), *b = Memories_Utf8ToWide(target), line[3000];
     size_t i;
-    snprintf(from, sizeof(from), "%s", link);
-    snprintf(to, sizeof(to), "%s", target);
-    for (i = 0; from[i]; i++)
-        if (from[i] == '/') from[i] = '\\';
-    for (i = 0; to[i]; i++)
-        if (to[i] == '/') to[i] = '\\';
-    snprintf(command, sizeof(command), "cmd /c mklink /J \"%s\" \"%s\" > NUL 2>&1", from, to);
-    (void)!system(command);
+    if (a && b) {
+        for (i = 0; a[i]; i++)
+            if (a[i] == L'/') a[i] = L'\\';
+        for (i = 0; b[i]; i++)
+            if (b[i] == L'/') b[i] = L'\\';
+        _snwprintf(line, sizeof(line) / sizeof(line[0]), L"mklink /J \"%ls\" \"%ls\" >nul 2>&1", a, b);
+        line[sizeof(line) / sizeof(line[0]) - 1] = 0;
+        (void)!_wsystem(line);
+    }
+    free(a);
+    free(b);
 #else
     (void)!symlink(target, link);
 #endif
