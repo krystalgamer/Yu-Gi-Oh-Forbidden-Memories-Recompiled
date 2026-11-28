@@ -1163,6 +1163,21 @@ if(BUILD_TESTING)
         target_compile_options(memories_mod_import_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME pc_mod_import COMMAND memories_mod_import_test)
+    # A recording's .yfmreplay packed on a thread of its own (src/pc/debug/replay_file.c,
+    # notes/replays.md "Packing"): whole and at once, nothing left on a failure, the folder
+    # not touched while it runs, several at once, bounded waits.
+    find_package(Threads REQUIRED)
+    add_executable(memories_replay_pack_test tests/pc/replay_pack_test.c src/pc/debug/replay_file.c src/pc/mods/import.c
+        src/pc/mods/json.c src/pc/platform/paths.c)
+    target_include_directories(memories_replay_pack_test PRIVATE src tests/pc)
+    target_link_libraries(memories_replay_pack_test PRIVATE ZLIB::ZLIB Threads::Threads)
+    if(NOT MSVC)
+        target_compile_options(memories_replay_pack_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME pc_replay_pack COMMAND memories_replay_pack_test)
+    # A pack under way when the process ends in exit(), in a process of its own and cold.
+    add_test(NAME pc_replay_pack_exit COMMAND memories_replay_pack_test exit)
+    set_tests_properties(pc_replay_pack_exit PROPERTIES TIMEOUT 60)
     # The fusions mods add (src/pc/cards/fusion_table.c), against a plain list.
     add_executable(memories_fusion_table_test tests/pc/fusion_table_test.c src/pc/cards/fusion_table.c)
     target_include_directories(memories_fusion_table_test PRIVATE src)

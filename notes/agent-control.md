@@ -347,7 +347,8 @@ replay can begin at a state.
   recording starts at a `VSync(0)` from a start state taken there and loaded
   at once, so that it begins as a play of it does, with only what the state
   holds; `record stop` (and a restart, which skips atexit on Windows) writes
-  its `E`. That is the player's format (notes/replays.md): a `poke`, a
+  its `E`; the `.yfmreplay` is packed on a thread of its own, and `record stop`
+  answers `ok` once it is whole (notes/replays.md, "Packing"). That is the player's format (notes/replays.md): a `poke`, a
   `jump`, a `load` or a host action ends it instead of being recorded. The
   channel's `record_boot` (Game > Record replay from boot...) restarts the
   game and records from boot instead, with no start state in the file.

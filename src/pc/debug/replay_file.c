@@ -1,10 +1,13 @@
 /* A player's replay as one file (replay_file.h). */
+#define _POSIX_C_SOURCE 200809L
 #include "pc/compat/fs.h"
 #include "replay_file.h"
 #include "pc/mods/import.h"
 #include "pc/platform/paths.h"
 #include <dirent.h>
 #include <errno.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -103,6 +106,12 @@ int ReplayFile_Begin(const char *file, char *recording, size_t recording_size, c
         snprintf(why, why_size, "The replay's path is too long.");
         return -1;
     }
+    /* The folder of a recording being packed is the pack's (ReplayFile_PackStart): a new
+     * recording to the same file waits for it, and the player is told why. */
+    if (ReplayFile_PackRunning(file)) {
+        snprintf(why, why_size, "An earlier recording to this file is still being packed: try again in a moment.");
+        return -1;
+    }
     if (!access(work, F_OK)) Mods_ImportRemoveTree(work);
     snprintf(to, sizeof(to), "%s/progress", work);
     if (Paths_MakeDirs(to)) {
@@ -186,20 +195,23 @@ static void json_words(char **at, char *end, const char *words, int pairs)
 static char *header_json(const char *recording, size_t *size, int *from_boot)
 {
     static const char *const keys[] = {"build: ", "os: ", "settings: ", "mods: ", "clock: "};
-    static char values[5][4096], line[8192]; /* not on the game's stack, which a VSync's caller may be on */
+    /* On the heap and not static: it runs on a pack's thread, and two packs may run at once. */
+    char (*values)[4096] = calloc(5, sizeof(*values)), *line = malloc(8192);
     char build[64] = "", language[16] = "0";
     int boot = 0; /* "start boot": no start state in the file */
     char *json = malloc(65536), *at = json, *end;
     FILE *file = fopen(recording, "r");
     const char *found;
     size_t i;
-    if (!json) {
+    if (!json || !values || !line) {
         if (file) fclose(file);
+        free(json);
+        free(values);
+        free(line);
         return NULL;
     }
     end = json + 65536 - 1;
-    memset(values, 0, sizeof(values));
-    while (file && fgets(line, sizeof(line), file)) {
+    while (file && fgets(line, 8192, file)) {
         line[strcspn(line, "\r\n")] = '\0';
         if (!strncmp(line, "build ", 6)) snprintf(build, sizeof(build), "%s", line + 6);
         if (!strcmp(line, "start boot")) boot = 1;
@@ -229,6 +241,8 @@ static char *header_json(const char *recording, size_t *size, int *from_boot)
                             : "\n },\n \"start\": {\"kind\": \"state\", \"file\": \"start.state\"},\n");
     json_raw(&at, end, " \"recording\": \"recording.txt\",\n \"progress\": \"progress\",\n \"states_every\": 0,\n");
     json_raw(&at, end, boot ? " \"notes\": \"Game > Record replay from boot\"\n}\n" : " \"notes\": \"Game > Record replay\"\n}\n");
+    free(values);
+    free(line);
     *at = '\0';
     *size = (size_t)(at - json);
     *from_boot = boot;
@@ -250,15 +264,21 @@ static int add_one(const char *path, const char *name, void *context)
     return Mods_ZipAddFile(add->zip, entry, path, add->why, add->why_size) ? 0 : -1;
 }
 
-int ReplayFile_Finish(const char *file, char *why, size_t why_size)
+/* The packing itself, on whichever thread: the zip is written beside the
+ * file as "<file>.partial" and renamed over it when it is whole, so that the
+ * file is never half a zip (a game that is killed leaves the .partial and the
+ * folder). `recording_size` is the recording's length when it was stopped,
+ * 0 when not known. */
+static int pack_files(const char *file, unsigned long long recording_size, char *why, size_t why_size)
 {
-    char work[1100], path[1200], prefix[300], state[1200];
+    char work[1100], path[1200], prefix[300], state[1200], partial[1200];
     const char *name;
     char *json;
     size_t json_size = 0;
     ModsZipOut *zip;
+    struct stat info;
     int i, ok, boot = 0;
-    if (work_folder(file, work, sizeof(work))) {
+    if (work_folder(file, work, sizeof(work)) || snprintf(partial, sizeof(partial), "%s.partial", file) >= (int)sizeof(partial)) {
         snprintf(why, why_size, "The replay's path is too long.");
         return -1;
     }
@@ -267,6 +287,12 @@ int ReplayFile_Finish(const char *file, char *why, size_t why_size)
      * state" and the refusal below would blame the state, not the recording. */
     if (!is_file(path)) {
         snprintf(why, why_size, "The recording (recording.txt) is missing or cannot be read.");
+        return -1;
+    }
+    /* What the game thread handed over is what is packed: a recording that is
+     * not the length it had at the stop was touched by something else. */
+    if (recording_size && (stat(path, &info) || (unsigned long long)info.st_size != recording_size)) {
+        snprintf(why, why_size, "The recording changed after it was stopped.");
         return -1;
     }
     if (!(json = header_json(path, &json_size, &boot))) {
@@ -282,7 +308,7 @@ int ReplayFile_Finish(const char *file, char *why, size_t why_size)
         snprintf(why, why_size, "The recording starts from a state, and its start state is missing.");
         return -1;
     }
-    if (!(zip = Mods_ZipCreate(file, why, why_size))) {
+    if (!(zip = Mods_ZipCreate(partial, why, why_size))) {
         free(json);
         return -1;
     }
@@ -302,14 +328,170 @@ int ReplayFile_Finish(const char *file, char *why, size_t why_size)
         }
     }
     if (!ok) Mods_ZipAbandon(zip);
-    if (!Mods_ZipFinish(zip, why, why_size)) return -1;
+    if (!Mods_ZipFinish(zip, why, why_size)) return -1; /* it removes the .partial */
+    if (rename(partial, file)) {
+        snprintf(why, why_size, "Could not name the replay %s: %s.", file, strerror(errno));
+        remove(partial);
+        return -1;
+    }
     Mods_ImportRemoveTree(work);
     return 0;
+}
+
+int ReplayFile_Finish(const char *file, char *why, size_t why_size)
+{
+    if (ReplayFile_PackRunning(file)) {
+        snprintf(why, why_size, "It is being packed on its own thread.");
+        return -1;
+    }
+    return pack_files(file, 0, why, why_size);
+}
+
+/* --- packing off the game's thread -------------------------------------
+ *
+ * A few slots, each a thread that runs pack_files for one recording. The game
+ * thread owns a slot while it is FREE and after it is taken; the thread owns
+ * it while it is RUNNING and publishes the end in `state` (atomic, the last
+ * thing it writes, as import_job.c does). The thread touches only the files
+ * of its recording: no guest memory, no clock, no notice (the recorder
+ * tells the player, on the game's thread, when it takes the result). */
+
+#define PACK_SLOTS 4
+enum { PACK_FREE, PACK_RUNNING, PACK_ENDED };
+
+static struct PackJob {
+    int state; /* atomic */
+    pthread_t thread;
+    int quiet, failed;
+    unsigned tenths; /* how long it took, in tenths of a millisecond */
+    unsigned long long recording_size;
+    char file[1100];
+    char why[400];
+} jobs[PACK_SLOTS];
+static void (*pack_hook)(const char *file);
+
+static double milliseconds(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)now.tv_sec * 1000.0 + (double)now.tv_nsec / 1e6;
+}
+
+static void *pack_thread(void *argument)
+{
+    struct PackJob *job = argument;
+    double began;
+    if (pack_hook) pack_hook(job->file);
+    began = milliseconds();
+    job->failed = pack_files(job->file, job->recording_size, job->why, sizeof(job->why)) != 0;
+    job->tenths = (unsigned)((milliseconds() - began) * 10.0);
+    /* No fprintf from here, to stderr or anywhere. A thread that prints a number while the process is in
+     * exit() hung it on the Windows C runtime (seen with "%.1f" here, and in a bare test program with
+     * "%ld"; it did not when the main thread had printed numbers before, so it is a first use of
+     * something, which snprintf and the file calls this thread makes do not trip). PackTake says how it
+     * went, on the caller's thread. */
+    __atomic_store_n(&job->state, PACK_ENDED, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+void ReplayFile_SetPackHook(void (*hook)(const char *file)) { pack_hook = hook; }
+
+int ReplayFile_PackStart(const char *file, unsigned long long recording_size, int quiet, char *why, size_t why_size)
+{
+    struct PackJob *job = NULL;
+    int i, running = 0, created;
+    if (strlen(file) >= sizeof(job->file)) {
+        snprintf(why, why_size, "The replay's path is too long.");
+        return -1;
+    }
+    if (ReplayFile_PackRunning(file)) {
+        snprintf(why, why_size, "It is already being packed.");
+        return -1;
+    }
+    for (i = 0; i < PACK_SLOTS; i++) {
+        if (__atomic_load_n(&jobs[i].state, __ATOMIC_ACQUIRE) == PACK_FREE) {
+            if (!job) job = &jobs[i];
+        } else if (__atomic_load_n(&jobs[i].state, __ATOMIC_ACQUIRE) == PACK_RUNNING) {
+            running++;
+        }
+    }
+    if (!job) {
+        snprintf(why, why_size, "Too many replays are being packed at once.");
+        return -1;
+    }
+    memset(job->why, 0, sizeof(job->why));
+    snprintf(job->file, sizeof(job->file), "%s", file);
+    job->recording_size = recording_size;
+    job->quiet = quiet;
+    job->failed = 0;
+    __atomic_store_n(&job->state, PACK_RUNNING, __ATOMIC_RELEASE);
+#ifndef _WIN32
+    /* The interrupt clock's signal (MEMORIES_CLOCK=interrupt) belongs to the game's thread: blocked here,
+     * the new thread starts with it blocked, and no tick can land on it before it could mask it. (On
+     * Windows the clock interrupts the main thread only: compat/signal.h.) */
+    sigset_t alarm, before;
+    sigemptyset(&alarm);
+    sigaddset(&alarm, SIGALRM);
+    pthread_sigmask(SIG_BLOCK, &alarm, &before);
+    created = pthread_create(&job->thread, NULL, pack_thread, job);
+    pthread_sigmask(SIG_SETMASK, &before, NULL);
+#else
+    created = pthread_create(&job->thread, NULL, pack_thread, job);
+#endif
+    if (created) {
+        __atomic_store_n(&job->state, PACK_FREE, __ATOMIC_RELEASE);
+        snprintf(why, why_size, "The packing could not get a thread of its own.");
+        return -1;
+    }
+    fprintf(stderr, "memories-pc: replay: packing %s on a thread of its own (%d other%s running)\n", file, running,
+            running == 1 ? "" : "s");
+    return 0;
+}
+
+int ReplayFile_PackTake(char *file, size_t file_size, int *quiet, char *why, size_t why_size)
+{
+    int i;
+    for (i = 0; i < PACK_SLOTS; i++) {
+        struct PackJob *job = &jobs[i];
+        int failed;
+        if (__atomic_load_n(&job->state, __ATOMIC_ACQUIRE) != PACK_ENDED) continue;
+        pthread_join(job->thread, NULL);
+        snprintf(file, file_size, "%s", job->file);
+        snprintf(why, why_size, "%s", job->why);
+        *quiet = job->quiet;
+        failed = job->failed;
+        fprintf(stderr, "memories-pc: replay: packed %s in %u.%u ms on a thread of its own%s%s\n", job->file,
+                job->tenths / 10, job->tenths % 10, failed ? ": " : "", failed ? job->why : "");
+        __atomic_store_n(&job->state, PACK_FREE, __ATOMIC_RELEASE);
+        return failed ? -1 : 1;
+    }
+    return 0;
+}
+
+int ReplayFile_PackRunning(const char *file)
+{
+    int i, count = 0;
+    for (i = 0; i < PACK_SLOTS; i++) {
+        if (__atomic_load_n(&jobs[i].state, __ATOMIC_ACQUIRE) == PACK_RUNNING && (!file || !strcmp(file, jobs[i].file))) count++;
+    }
+    return count;
+}
+
+int ReplayFile_PackWait(const char *file, unsigned timeout_ms)
+{
+    double deadline = milliseconds() + timeout_ms;
+    while (ReplayFile_PackRunning(file)) {
+        struct timespec nap = {0, 2000000L};
+        if (milliseconds() >= deadline) return 0;
+        nanosleep(&nap, NULL);
+    }
+    return 1;
 }
 
 void ReplayFile_Abandon(const char *file)
 {
     char work[1100];
+    if (ReplayFile_PackRunning(file)) return; /* its folder is the pack's */
     if (!work_folder(file, work, sizeof(work)) && !access(work, F_OK)) Mods_ImportRemoveTree(work);
 }
 
@@ -382,7 +564,8 @@ int ReplayFile_NewName(char *path, size_t size)
         if (n == 1) snprintf(relative, sizeof(relative), "replays/replay-%s.yfmreplay", stamp);
         else snprintf(relative, sizeof(relative), "replays/replay-%s-%d.yfmreplay", stamp, n);
         if (Paths_User(path, size, relative)) return -1;
-        if (access(path, F_OK)) return 0;
+        /* A recording being packed has no file yet, and its name is taken. */
+        if (access(path, F_OK) && !ReplayFile_PackRunning(path)) return 0;
     }
     return -1;
 }
