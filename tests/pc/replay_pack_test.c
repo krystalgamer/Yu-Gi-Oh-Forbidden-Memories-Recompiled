@@ -408,7 +408,7 @@ static void age(const char *path, long seconds)
 /* A pack folder as a cut-off game leaves it: recording.txt and progress/saves/slot01.sav in it. */
 static void make_parts(const char *folder, long recording_age, long other_age)
 {
-    char path[1400], progress[1400];
+    char path[1500], progress[1400];
     snprintf(progress, sizeof(progress), "%s/progress/saves", folder);
     CHECK(!Paths_MakeDirs(progress));
     snprintf(path, sizeof(path), "%s/recording.txt", folder);
@@ -456,7 +456,7 @@ static int make_link(const char *link, const char *target)
 
 static void leftovers_go_and_nothing_else(void)
 {
-    char replays[1100], p[1500], q[1500], keep[1500], why[400], outside[1100], target[1100];
+    char replays[1100], p[1500], q[1600], keep[1500], why[400], deep[1700], outside[1100], target[1100];
     size_t recording_size;
     int removed, links;
     snprintf(replays, sizeof(replays), "%s/user/replays", root);
@@ -520,10 +520,10 @@ static void leftovers_go_and_nothing_else(void)
     if (links) {
         snprintf(q, sizeof(q), "%s/inner.yfmreplay.parts", replays);
         CHECK(!Paths_MakeDirs(q));
-        snprintf(why, sizeof(why), "%s/inner.yfmreplay.parts/a.txt", replays);
-        make_old_file(why);
-        snprintf(why, sizeof(why), "%s/inner.yfmreplay.parts/linked", replays);
-        CHECK(make_link(why, target));
+        snprintf(deep, sizeof(deep), "%s/inner.yfmreplay.parts/a.txt", replays);
+        make_old_file(deep);
+        snprintf(deep, sizeof(deep), "%s/inner.yfmreplay.parts/linked", replays);
+        CHECK(make_link(deep, target));
     } else {
         fprintf(stderr, "replay_pack_test: no link could be made here: the link cases are skipped\n");
     }
