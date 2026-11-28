@@ -33,8 +33,16 @@ Headless, on the virtual clock, with SDL's dummy sound:
      `load`, which a player's replay cannot hold, as F8 ends one), whose
      game is then asked to quit at once, is a whole file after the game
      exits; so is one stopped and followed at once by a new recording, to
-     the same name and to another. The game's thread spends a few
-     milliseconds at each stop, a small part of what the pack takes.
+     the same name and to another. Each pack's thread is held for 3 s
+     (MEMORIES_REPLAY_PACK_HOLD_MS), so that these do not depend on how fast
+     the zip is made: a new recording to the name of a pack that runs is
+     refused, whichever way the name is spelled, one to another name starts
+     at once, and the quit waits through the recorder's own exit handler for
+     the packs still held. The game's thread spends a few milliseconds at
+     each stop (a generous absolute limit, and the log says no pack ran on
+     it). `record stop` whose wait runs out (MEMORIES_REPLAY_PACK_WAIT_MS)
+     answers "err ... still being packed" and the file appears when the
+     pack ends.
 
 What this does not cover. MEMORIES_PLAY is the environment's way into the
 same unpack, progress folder and playback that File > Play replay... reaches
@@ -70,6 +78,8 @@ SKIP = 77
 EXE = Path(os.environ.get("YFM_EXECUTABLE") or yfm_control.EXECUTABLE)
 DISC = os.environ.get("MEMORIES_DISC", "")
 SETTINGS = "mod.3d-monsters=0\nmod.hand-camera=0\n"
+HOLD_MS = 3000        # a pack's thread sleeps this long before it starts (MEMORIES_REPLAY_PACK_HOLD_MS)
+STOP_LIMIT_MS = 50    # the game's thread at a stop: 0.6 ms measured; the zip it replaced took 108 ms there
 
 
 def save_timeline() -> str:
@@ -359,9 +369,9 @@ def record_at_run_time(work: Path) -> Path:
     return file
 
 
-def start_recording(game: yfm_control.Game, file: Path, refused_for: tuple[str, ...] = ()) -> int:
+def start_recording(game: yfm_control.Game, file: Path | str, refused_for: tuple[str, ...] = ()) -> int:
     """`record file` at the next state point; how many tries were refused for one of `refused_for`
-    (a pack of that name still running)."""
+    (a pack of that name still running; waited for in real time: the pack is held for seconds)."""
     waited = 0
     for _ in range(400):
         try:
@@ -371,10 +381,21 @@ def start_recording(game: yfm_control.Game, file: Path, refused_for: tuple[str, 
             reason = str(refused)
             if any(text in reason for text in refused_for):
                 waited += 1
+                time.sleep(0.1)
             else:
                 assert "state point" in reason, refused
             game.step(1)
     raise AssertionError("the recording never started")
+
+
+def refused_while_packing(game: yfm_control.Game, file: Path | str) -> None:
+    """`record file` at once: refused because the pack of that file still runs, never for another reason."""
+    try:
+        game.command(f"record {file}")
+    except yfm_control.ControlError as refused:
+        assert "still being packed" in str(refused), refused
+        return
+    raise AssertionError(f"a recording to {file} started while its pack ran")
 
 
 def whole_replay(file: Path) -> list[str]:
@@ -398,7 +419,8 @@ def stop_at_once(work: Path) -> None:
     user = work / "stop-user"
     first, second = work / "stop-a.yfmreplay", work / "stop-b.yfmreplay"
     missing = work / "no-such.state"
-    game = yfm_control.Game(EXE, out=work / "stop", env={"MEMORIES_USER_DIR": str(user), "SDL_AUDIODRIVER": "dummy"},
+    game = yfm_control.Game(EXE, out=work / "stop", env={"MEMORIES_USER_DIR": str(user), "SDL_AUDIODRIVER": "dummy",
+                                                         "MEMORIES_REPLAY_PACK_HOLD_MS": str(HOLD_MS)},
                             settings={"mod.3d-monsters": 0, "mod.hand-camera": 0})
     waited = 0
     try:
@@ -416,15 +438,21 @@ def stop_at_once(work: Path) -> None:
         start_recording(game, first)
         game.step(100)
         end_by_host_action()
-        # At once, to the same name: refused while the pack of it runs, taken the moment it is done.
+        # At once, to the same name: refused while the pack of it runs (held, so it does), whichever way the
+        # name is spelled, and taken the moment it is done.
+        refused_while_packing(game, first)
+        refused_while_packing(game, f"{first.parent}/./{first.name}")
+        if os.name == "nt":
+            refused_while_packing(game, str(first).upper().replace("/", "\\"))
         waited = start_recording(game, first, refused_for=("still being packed",))
         game.step(200)
         end_by_host_action()
-        # At once, to another name.
-        start_recording(game, second)
+        # At once, to another name: nothing of its name is packing, so it starts at once.
+        assert start_recording(game, second, refused_for=("still being packed",)) == 0
         game.step(120)
         end_by_host_action()
-        game.quit()   # at once: the game must wait for the pack, not leave half a file
+        # At once: the recorder's exit handler must wait for the packs still held, not leave half a file.
+        game.quit()
     finally:
         game.close()
     log = (work / "stop" / "game.log").read_text(encoding="utf-8", errors="replace")
@@ -435,11 +463,50 @@ def stop_at_once(work: Path) -> None:
     stops = [float(ms) for ms in re.findall(r"record: stopped, ([0-9.]+) ms on the game's thread", log)]
     packs = [float(ms) for ms in re.findall(r"replay: packed .* in ([0-9.]+) ms on a thread of its own", log)]
     assert len(stops) == 3 and len(packs) == 3, f"expected 3 stops and 3 packs; see {work / 'stop' / 'game.log'}"
-    assert max(stops) < min(packs) / 2, f"the game's thread did not leave the pack to its own: {stops} against {packs}"
+    # No wall-clock ratio (a loaded runner stretches both sides): no pack ran on the game's thread, which the
+    # log says, and the median stop is far under the 100 ms or more the zip takes there (a generous limit).
+    assert "on the game's thread." not in log, "a pack ran on the game's thread"
+    assert sorted(stops)[1] < STOP_LIMIT_MS, f"the game's thread spent {stops} ms at the stops (limit {STOP_LIMIT_MS})"
     assert "could not be packed" not in log, "a pack failed"
     print(f"player_replay_test: three stops at once handed to their threads ({waited} start(s) of the same name "
           f"waited): game's thread {', '.join(f'{ms:.2f}' for ms in stops)} ms, packs on their own "
           f"{', '.join(f'{ms:.0f}' for ms in packs)} ms; both files whole after the quit")
+
+
+def stop_wait_runs_out(work: Path) -> None:
+    """`record stop` whose wait for the pack runs out is an err, not an ok: the recording is stopped, the
+    file is not there yet, and it appears when the pack ends."""
+    file = work / "slow.yfmreplay"
+    game = yfm_control.Game(EXE, out=work / "slow", env={"MEMORIES_USER_DIR": str(work / "slow-user"),
+                                                         "SDL_AUDIODRIVER": "dummy",
+                                                         "MEMORIES_REPLAY_PACK_HOLD_MS": "4000",
+                                                         "MEMORIES_REPLAY_PACK_WAIT_MS": "300"},
+                            settings={"mod.3d-monsters": 0, "mod.hand-camera": 0})
+    try:
+        game.wait_until(lambda g: g.info()["frame"] >= 600, 3000, what="frame 600")
+        start_recording(game, file)
+        game.step(60)
+        try:
+            game.command("record stop")
+            raise AssertionError("record stop said ok with the pack still held")
+        except yfm_control.ControlError as late:
+            assert "still being packed" in str(late), late
+        assert not file.exists(), "the file was there while its pack was held"
+        try:
+            game.command("record stop")
+            raise AssertionError("the recording was still running after record stop")
+        except yfm_control.ControlError as stopped:
+            assert "not recording" in str(stopped), stopped
+        deadline = time.time() + 30
+        while not file.is_file() and time.time() < deadline:
+            time.sleep(0.2)
+        game.quit()
+    finally:
+        game.close()
+    whole_replay(file)
+    log = (work / "slow" / "game.log").read_text(encoding="utf-8", errors="replace")
+    assert "still being packed after 300 ms" in log, "the wait did not run out in the log"
+    print("player_replay_test: record stop whose wait ran out was an err, and the file came when the pack ended")
 
 
 def play_without_touching_the_saves(work: Path, file: Path) -> None:
@@ -504,6 +571,7 @@ def main() -> int:
         play_from_boot_item(work, boot_file)
         file = record_at_run_time(work)
         stop_at_once(work)
+        stop_wait_runs_out(work)
         play_without_touching_the_saves(work, file)
         refuse_commands(work, file)
         refuse_damaged_state(work, file)
