@@ -518,7 +518,9 @@ and pause and frame step work, headless runs flat out; see
 `MEMORIES_DUMP_FRAME` and `MEMORIES_SPEED=-1` still selects it too),
 `MEMORIES_RECORD=path` (the pad bits of every VBlank, a frame hash at
 every frame and, with `MEMORIES_RECORD_STATES=N`, a state every N VBlanks,
-as text; `src/pc/debug/recorder.h`), `MEMORIES_PLAY=path` (play such a
+as text; `src/pc/debug/recorder.h`; `MEMORIES_REPLAY_PACK_HOLD_MS` and
+`MEMORIES_REPLAY_PACK_WAIT_MS` are the tests' knobs for the pack thread, see
+[replays](replays.md)), `MEMORIES_PLAY=path` (play such a
 file back instead of the live pads, ending the game at its end; a
 `.yfmreplay` is played as File > Play replay... plays it,
 [replays](replays.md); either turns the virtual clock and the stepped

@@ -88,6 +88,19 @@ void Recorder_Command(const char *line);
  * why. */
 int Recorder_Start(const char *path, char *why, size_t why_size);
 int Recorder_Stop(void);
+/* A player's recording is packed into its .yfmreplay on a thread of its own
+ * once it stops (replay_file.h): Recorder_Stop, F8 and a host action that ends
+ * a recording return at once, and the notice ("Replay saved", or why not)
+ * comes when the pack is done. This waits, bounded (30 s), for the packs under
+ * way and tells how they ended. Stopping the game does it (atexit), and so does
+ * anything that restarts it (Recorder_BeforeRestart); the control channel's
+ * `record stop` does it before its "ok", so a client that gets the "ok" finds
+ * the file whole. 1 when no pack runs now, 0 when the wait ran out (the pack
+ * goes on: `record stop` then answers "err ... still being packed"). Main
+ * thread. MEMORIES_REPLAY_PACK_WAIT_MS (ms) sets the bound and
+ * MEMORIES_REPLAY_PACK_HOLD_MS holds each pack's thread that long before it
+ * starts: for the tests. */
+int Recorder_FinishPacking(void);
 int Recorder_Recording(void);
 /* Game > Record replay: a new .yfmreplay in the user folder's replays/,
  * started at the next state point. Main thread. */

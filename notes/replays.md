@@ -14,6 +14,10 @@ file goes to the user folder's `replays/` (on Windows
 and a notice names it. Closing the game, or anything that restarts it
 (Apply & restart in Mods, a language change, Stop replay), saves it too.
 
+When a recording stops, its file is made **on a thread of its own**, and the
+game goes on: see "Packing" below. The notice ("Replay saved", or why not)
+comes when the file is whole.
+
 When a recording starts:
 
 - The game switches to the **virtual clock** (the one the agents' replays
@@ -105,6 +109,93 @@ comes up is an ordinary boot (the logos, then the title), with the player's
 saves as they were when the game restarted. Stop and a restart
 end it as for a recording from here. The item is off while a recording or a
 replay is on.
+
+### Packing
+
+Stopping a recording used to pack the zip on the game's thread: 108 ms
+measured (a 2.5-minute recording from here: 87 ms deflating the 7.6 MB start
+state at level 6, 9 ms the recording's 8400 frames, 4 ms creating the file,
+3 ms removing the folder, 3 ms the progress, 2 ms the header; a recording from
+boot has no state to deflate), during which the game did not run, the sound
+FIFO ran dry and the player heard a gap. Now `Recorder_Stop` (F8, the menu, a host action
+that ends a recording, a restart) does only what has to be the game's: it
+writes the `E` line, closes `recording.txt`, notes its length and hands the
+working folder (`<file>.parts`) to a thread of its own
+(`ReplayFile_PackStart`, replay_file.c; 0.6 ms measured, logged as
+`record: stopped, N ms on the game's thread`). The thread reads and writes
+files and nothing else: no guest memory, none of the game's clocks and no notice, so the game
+sees nothing different (`MEMORIES_CLOCK=interrupt`'s signal is blocked in the
+thread that starts it, so the new thread starts with it blocked). It prints
+nothing to a stream either: a thread that printed a number while the process
+was in `exit()` hung the Windows process (`pack_thread`).
+It writes `<file>.partial` and renames it to `<file>` when the zip is whole
+(on Windows over a file that is there, written through): the `.yfmreplay` is
+there whole or not at all, and a failure removes the `.partial` and keeps the
+folder, as before. How it went is told on the game's thread, by the same
+notice as before, when the recorder takes the result (`packs_ended`, from
+`Recorder_Point` and from the notice poll): the pack's own thread never
+calls `notify`.
+
+- **A new recording while a pack runs** does not collide: every recording has
+  its own folder, so a new one to another name starts at once, and up to four
+  packs run together (a fifth is packed on the game's thread, as it was
+  before). One to the **same** file is refused ("An earlier recording to this
+  file is still being packed: try again in a moment"), since the folder is
+  the pack's; a name made for a new file (`ReplayFile_NewName`) skips a name
+  whose pack still runs, so F8 twice in a second does not. "The same file" is
+  decided by what the path names, not by how it is spelled: both are made
+  absolute, with `.`/`..` and doubled slashes taken out, links followed where
+  they exist, and, on Windows (and macOS), compared without case and with
+  either slash (`replay_file.c`, `canonical_file`): `record C:/u/replays/a.yfmreplay`
+  and then `record replays\A.yfmreplay` while the first packs is the same
+  refusal, not a folder deleted under the thread.
+- **Quitting or restarting while a pack runs** waits for it, bounded to 30 s:
+  `atexit` (closing the window, the control channel's `quit`, the end of a
+  replay) and `Recorder_BeforeRestart` (Platform_RestartGame: a restart, a
+  `record_boot`, a language change, which end the process with `execv` or
+  `TerminateProcess` and so would cut the thread) call
+  `Recorder_FinishPacking`. A script that does `record stop` and then `quit`
+  finds a whole `.yfmreplay` after the game has gone. A game that is killed
+  or crashes leaves the `.partial` and the folder, never a half file.
+- **The control channel's `record stop`** stays synchronous in what it
+  promises: it reports `ok` only after the file is whole (it waits for the
+  packs inside the command, where the game is held anyway), so a client that
+  gets the `ok` can read the file. When the wait runs out (30 s: a stuck
+  disk) the recording is stopped all the same and the reply is
+  `err recording stopped, but the replay is still being packed: the file
+  appears when the pack ends`, never an `ok` for a file that is not there; the
+  pack goes on, and the quit that follows waits for it again. A failed pack is
+  told as before: the notice and the log, `ok` all the same. A recording ended by a host action
+  (`load`, `poke`, `jump`...) is not waited for: the file is there by the
+  time the game quits, or in a moment.
+
+- **Notices** are queued (`notice_queue.h`, eight, the menu shows one at a
+  time): a failure ("Replay not saved") is never taken by the notice of the
+  same poll ("Recording not started") or by the "Replay saved" of another
+  pack that ended with it. When the queue is full the oldest success goes
+  first, then the oldest notice; the log has every one.
+- **Leftovers.** A game that is killed or crashes, an exit that gave up after
+  30 s, or a restart that cut the thread leaves `<file>.partial` and
+  `<file>.parts` (about 8 MB) in `replays/`. At startup (`Recorder_Init`,
+  `ReplayFile_RemoveLeftovers`) those are removed, and only those: names ending
+  `.yfmreplay.partial` (a plain file) or `.yfmreplay.parts` (a folder) in the
+  user directory's `replays/`, never a `.yfmreplay`, never anything outside
+  that folder, never a link or a folder that holds one (nothing is followed:
+  on Windows `Mods_ImportRemoveTree` follows a junction, so a link anywhere
+  inside leaves the whole folder alone). Not the files of the recording this
+  start is about to make (the marker `next-record.txt`'s file, whose folder
+  `ReplayFile_Begin` makes anew anyway), nor of a pack of this process. And
+  only what has not been touched for **an hour**, by the newest file in it
+  (a folder's own time says only when a name came or went): a second game on
+  the same user directory may be recording (its `recording.txt` grows at
+  every frame) or packing (its `.partial` grows) right now, and the time is
+  long enough that a game that is paused for ten minutes is not taken for
+  dead; what is left is 8 MB until the start after the hour.
+- **Test knobs**: `MEMORIES_REPLAY_PACK_HOLD_MS` makes every pack's thread
+  sleep that long before it reads anything, and `MEMORIES_REPLAY_PACK_WAIT_MS`
+  sets the bound of the waits (default 30 s); `player_replay_test.py` uses
+  them so that "refused while a pack runs", "the quit waits" and "the wait runs
+  out" do not depend on the speed of the zip.
 
 What is recorded is the pad bits the game reads at every VBlank, from every
 source (keyboard, controllers, the mouse's and the touch controls' buttons),
@@ -202,7 +293,17 @@ plays it back frame for frame (through `MEMORIES_PLAY`, headless: the unpack,
 the scratch progress and the playback File > Play replay... shares; not the
 menu item and its restart through `next.txt`, a window's clock, the audio
 FIFO or the tower guards). It also checks that a leftover marker is dropped
-and starts nothing. The FIFO's fades and joins, and the pacer's decision
+and starts nothing, and that packing is off the game's thread: a recording that
+a host action ends, whose game is told to quit at once, and ones started at
+once to the same name and to another, are whole files after the exit, and the
+game's thread spent a small part of the pack's time at each stop. The pack
+itself (whole and at once, nothing left on a failure, the folder not touched
+while it runs, other spellings of the same path, several at once (exactly
+four), bounded waits, the leftovers at startup with their links and ages, the
+notice queue) is `tests/pc/replay_pack_test.c` (CTest `pc_replay_pack`), with
+the thread held at its start so that none of it depends on speed; its `exit`
+case has an exit handler of its own, and the recorder's real one (`at_exit_end`)
+is `player_replay_test.py`'s quit with packs held for 3 s. The FIFO's fades and joins, and the pacer's decision
 (`AudioFifo_PaceGrid`), are `tests/pc/audio_fifo_test.c`'s (CTest
 `pc_audio_fifo`). A recording's package says "from boot" by its header's
 `start boot` line, not by the folder holding no state: a recording from a

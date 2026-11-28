@@ -16,7 +16,9 @@
  *                      and the memory card images (paths.h, Paths_IsProgress)
  *
  * Recording, the parts are written into a folder beside the file,
- * "<file>.parts", and packed when the recording stops. Playing, the file is
+ * "<file>.parts", and packed when the recording stops: on a thread of its own
+ * (ReplayFile_PackStart), so that the game does not wait for the zip, and
+ * into "<file>.partial", renamed to the file when it is whole. Playing, the file is
  * read with the hardened zip reader of Import mod... (src/pc/mods/import.c:
  * no name that leaves its folder, no link, sizes and CRCs checked) and
  * unpacked into the user directory's replays/.playing, whose progress/ the
@@ -31,10 +33,52 @@
  * in. 0, or -1 with why. */
 int ReplayFile_Begin(const char *file, char *recording, size_t recording_size, char *state, size_t state_size,
                      char *why, size_t why_size);
-/* Packs the working folder into `file` and removes it: 0, or -1 with why
- * (the folder is then kept, for the player to look at). */
+/* Packs the working folder into `file` and removes it, here and now: 0, or
+ * -1 with why (the folder is then kept, for the player to look at). `file`
+ * appears only when it is whole. */
 int ReplayFile_Finish(const char *file, char *why, size_t why_size);
-/* Removes the working folder of a recording that did not start. */
+/* The same on a thread of its own, the game going on. The folder is the
+ * thread's from here on: nothing may write into it, and Begin and Abandon of
+ * the same `file` leave it alone (Begin refuses) until the pack has ended.
+ * `recording_size` is the length recording.txt had when it was stopped (0:
+ * not checked): a recording that is another length when the thread reads it
+ * is refused, not packed. `quiet` is for the caller's use at the end (the
+ * recorder tells "Replay saved" unless it said something already). The thread
+ * reads and writes files and nothing else: no guest memory, no clock, no
+ * notice. 0 with the pack under way, or -1 with why when there was no thread
+ * or no free slot (a few packs run at once): the caller then packs with
+ * ReplayFile_Finish, and the pack's own folder is the only one it touched. */
+int ReplayFile_PackStart(const char *file, unsigned long long recording_size, int quiet, char *why, size_t why_size);
+/* How many packs run at once: one more is refused (the caller packs it itself). */
+#define REPLAY_PACK_SLOTS 4
+/* One pack that has ended, taken (the game's thread only: it is joined): 1
+ * saved, -1 not saved with why (its folder kept), 0 none ended. */
+int ReplayFile_PackTake(char *file, size_t file_size, int *quiet, char *why, size_t why_size);
+/* How many packs run (of `file`, or any when NULL; one ended and not yet
+ * taken is not running). A file is named by what it is, not by how it is
+ * spelled: "replays\A.yfmreplay" and "C:/u/replays/a.yfmreplay" are one file
+ * on Windows, "x/./a" and "x//a" and a link's two names everywhere. */
+int ReplayFile_PackRunning(const char *file);
+/* Waits for the packs of `file` (or any) to end, at most `timeout_ms`: 1 when
+ * none runs now, 0 when the time is up. A pack that never ends leaves its
+ * .partial and its folder, and never a half file under `file`. */
+int ReplayFile_PackWait(const char *file, unsigned timeout_ms);
+/* Tests: called by the pack's thread when it starts, before it reads anything. */
+void ReplayFile_SetPackHook(void (*hook)(const char *file));
+/* At startup: removes what a game that did not finish left in the user
+ * directory's replays/: "<name>.yfmreplay.partial" files and
+ * "<name>.yfmreplay.parts" folders (a pack cut off by a kill, a crash, an exit
+ * that gave up waiting, or a restart that came first), and nothing else: never
+ * a .yfmreplay, nothing outside replays/, no link and nothing that holds one
+ * (nothing is followed), not those of `keep` (the .yfmreplay this start is
+ * about to record, or NULL) nor of a pack of this process. Only what nothing
+ * has touched for `min_age_seconds`, the newest time in the folder counting:
+ * another game that shares the folder may be recording to one (its
+ * recording.txt grows at every frame) or packing one (its .partial grows) right
+ * now, and leaves it fresh. Returns how many it removed. */
+int ReplayFile_RemoveLeftovers(const char *keep, unsigned min_age_seconds);
+/* Removes the working folder of a recording that did not start (not one a
+ * pack is reading). */
 void ReplayFile_Abandon(const char *file);
 /* Unpacks `file` for playing: the paths of its recording and start state
  * (empty when it starts from boot) and of the progress folder to use.

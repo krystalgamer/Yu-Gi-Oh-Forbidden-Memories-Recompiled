@@ -4,6 +4,7 @@
 #include "replay_file.h"
 #include "control.h"
 #include "control_protocol.h"
+#include "notice_queue.h"
 #include "pc/debug/monitor.h"
 #include "pc/guest/state.h"
 #include "pc/platform/paths.h"
@@ -14,6 +15,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 
 typedef struct {
     uint32_t index;
@@ -34,8 +37,7 @@ static int at_exit;
 static int player_record, player_play;
 static char zip_path[600];           /* recording: the .yfmreplay it becomes ("" for a plain one) */
 static volatile int start_asked;     /* Game > Record replay: at the next point */
-static char notice_title[64], notice_text[700];
-static volatile int notice_pending;
+static NoticeQueue notices; /* the game's thread only */
 static FILE *out;
 static char out_path[600];
 static unsigned states_every, last_state;
@@ -176,36 +178,112 @@ static void finish(void)
     out = NULL;
 }
 
+/* A notice for the player, queued behind the ones not shown yet (notice_queue.h):
+ * one that is a failure is never taken by a later one. */
 static void notify(const char *title, const char *format, const char *a, const char *b)
 {
-    snprintf(notice_title, sizeof(notice_title), "%s", title);
-    snprintf(notice_text, sizeof(notice_text), format, a ? a : "", b ? b : "");
-    notice_pending = 1;
-    fprintf(stderr, "memories-pc: replay: %s: %s\n", notice_title, notice_text);
+    char text[700];
+    snprintf(text, sizeof(text), format, a ? a : "", b ? b : "");
+    fprintf(stderr, "memories-pc: replay: %s: %s\n", title, text);
+    if (NoticeQueue_Push(&notices, title, text, strcmp(title, "Replay saved") != 0))
+        fprintf(stderr, "memories-pc: replay: too many notices are waiting: the oldest was dropped\n");
 }
 
-/* The E line and, for a player's recording, its .yfmreplay: 0, or -1
- * with a notice when it could not be packed. */
-static int end_recording(void)
+/* How a pack ended, told to the player: "Replay saved" (unless `quiet`: the
+ * caller said something already, as Recorder_HostAction does) or why not.
+ * The game's thread only: notify's buffers are not thread-safe, which is why
+ * the pack's own thread never calls it (replay_file.h). */
+static void report_pack(const char *file, int failed, const char *why, int quiet)
 {
-    char why[300];
+    if (failed) notify("Replay not saved", "The recording could not be packed into %s: %s", file, why);
+    else if (!quiet) notify("Replay saved", "%s%s", file, NULL);
+    else fprintf(stderr, "memories-pc: replay: saved %s\n", file);
+}
+
+/* The packs that ended since the last call, each told once. */
+static void packs_ended(void)
+{
+    char file[1100], why[400];
+    int quiet, got;
+    while ((got = ReplayFile_PackTake(file, sizeof(file), &quiet, why, sizeof(why))) != 0)
+        report_pack(file, got < 0, why, quiet);
+}
+
+/* How old a ".partial" or ".parts" must be (by its newest file) to be called a leftover at startup: long
+ * enough that no game still recording or packing is taken for dead, a recording that its game has
+ * paused for ten minutes included, short enough that a crash's leftovers (about 8 MB each) go at a start
+ * an hour later. */
+#define LEFTOVER_SECONDS 3600
+
+#define PACK_WAIT_MS 30000 /* about 150 ms on a disk that answers; a stuck one does not hold the exit for ever */
+
+/* The wait's bound: MEMORIES_REPLAY_PACK_WAIT_MS (a test's knob: a pack that is held for longer than it
+ * is the one that never ends), else PACK_WAIT_MS. */
+static unsigned pack_wait_ms(void)
+{
+    const char *text = getenv("MEMORIES_REPLAY_PACK_WAIT_MS");
+    unsigned long ms = text && *text ? strtoul(text, NULL, 10) : 0;
+    return ms ? (unsigned)ms : PACK_WAIT_MS;
+}
+
+/* MEMORIES_REPLAY_PACK_HOLD_MS (tests): every pack's thread sleeps this long before it starts reading, so that
+ * "a recording to the name of a pack that runs", "a quit while one runs" and "a wait that runs out" do not
+ * depend on how fast the zip is made. The time a pack takes is counted from after it. */
+static unsigned pack_hold_ms;
+
+static void hold_pack(const char *file)
+{
+    struct timespec span;
+    (void)file;
+    span.tv_sec = pack_hold_ms / 1000;
+    span.tv_nsec = (long)(pack_hold_ms % 1000) * 1000000L;
+    nanosleep(&span, NULL);
+}
+
+int Recorder_FinishPacking(void)
+{
+    unsigned wait = pack_wait_ms();
+    int done = ReplayFile_PackWait(NULL, wait);
+    if (!done) fprintf(stderr, "memories-pc: replay: a replay is still being packed after %u ms; going on without it\n", wait);
+    packs_ended();
+    return done;
+}
+
+/* The E line and, for a player's recording, the start of its .yfmreplay's
+ * packing: the game's thread closes the recording, notes how long it is and
+ * hands the folder to a thread of its own (replay_file.h), which writes the
+ * zip while the game goes on; packs_ended tells how it went. Only when no
+ * thread can be had, or `here` (the game is already ending, inside exit():
+ * a thread started there gains nothing), is it packed here, as it always was.
+ * 0, or -1 with a notice when that failed. */
+static int end_recording(int quiet, int here)
+{
+    char why[400];
     int failed = 0;
     finish();
     recording = 0;
     started = 0;
     if (zip_path[0]) {
-        failed = ReplayFile_Finish(zip_path, why, sizeof(why));
-        if (failed) notify("Replay not saved", "The recording could not be packed into %s: %s", zip_path, why);
+        struct stat info;
+        unsigned long long size = !stat(out_path, &info) ? (unsigned long long)info.st_size : 0;
+        if (here || ReplayFile_PackStart(zip_path, size, quiet, why, sizeof(why))) {
+            if (!here) fprintf(stderr, "memories-pc: replay: %s Packing %s on the game's thread.\n", why, zip_path);
+            failed = ReplayFile_Finish(zip_path, why, sizeof(why)) != 0;
+            report_pack(zip_path, failed, why, quiet);
+        }
         zip_path[0] = '\0';
     }
     return failed;
 }
 
-static int stop_recording(void);
+static int stop_recording(int quiet);
 
+/* Closing the game: a recording is ended, and the packs under way are waited
+ * for (bounded), so that the file is whole when the process is gone. */
 static void at_exit_end(void)
 {
-    if (recording) end_recording();
+    if (recording) end_recording(1, 1);
+    Recorder_FinishPacking();
 }
 
 /* The header: what made it, and where it starts. */
@@ -295,6 +373,12 @@ void Recorder_Init(void)
     int boot_taken = ReplayFile_TakeNextRecord(boot, sizeof(boot));
     int next_taken = ReplayFile_TakeNext(next, sizeof(next));
     int boot_asked = !boot_taken;
+    const char *hold = getenv("MEMORIES_REPLAY_PACK_HOLD_MS");
+    if (hold && *hold && (pack_hold_ms = (unsigned)strtoul(hold, NULL, 10)) != 0) ReplayFile_SetPackHook(hold_pack);
+    /* What an earlier game left in replays/ (a pack cut off by a kill or a crash): not the file this start
+     * records to from its first frame, which has its own folder made below, and not what is fresh (a
+     * game that shares the folder). */
+    ReplayFile_RemoveLeftovers(boot_asked ? boot : NULL, LEFTOVER_SECONDS);
     if (next_taken == 0) {
         if (play && *play) fprintf(stderr, "memories-pc: replay: MEMORIES_PLAY is set: replays/next.txt is not played\n");
         else play = next;
@@ -406,6 +490,7 @@ uint16_t Recorder_HostPad(int port, uint16_t live)
 void Recorder_Point(unsigned frame)
 {
     unsigned index, i;
+    packs_ended();
     if (start_asked) {
         /* Game > Record replay, taken at this state point. Does not return
          * when it starts (the start state is loaded). */
@@ -595,18 +680,24 @@ int Recorder_Start(const char *path, char *why, size_t why_size)
     /* Returns only when the load was refused. */
     Memories_StateLoadHere(state, why, why_size);
     zip_path[0] = '\0';
-    stop_recording();
+    stop_recording(1);
     remove(recording_path);
     if (packed) ReplayFile_Abandon(path);
     return -1;
 }
 
-/* Ends a recording: 0 when it is saved, -1 when it was not (with a
- * notice). */
-static int stop_recording(void)
+/* Ends a recording: 0 when it is on its way to a file (or needs none), -1
+ * when it was not saved (with a notice). The time it takes the game's thread
+ * is in the log: the pack itself is not part of it. */
+static int stop_recording(int quiet)
 {
-    int failed = end_recording();
-    fprintf(stderr, "memories-pc: record: stopped\n");
+    struct timespec began, ended;
+    int failed;
+    clock_gettime(CLOCK_MONOTONIC, &began);
+    failed = end_recording(quiet, 0);
+    clock_gettime(CLOCK_MONOTONIC, &ended);
+    fprintf(stderr, "memories-pc: record: stopped, %.2f ms on the game's thread\n",
+            (double)(ended.tv_sec - began.tv_sec) * 1000.0 + (double)(ended.tv_nsec - began.tv_nsec) / 1e6);
     player_record = 0;
     if (!playing) {
         Platform_SetVirtualClock(0);
@@ -617,10 +708,8 @@ static int stop_recording(void)
 
 int Recorder_Stop(void)
 {
-    char saved[sizeof(zip_path)];
     if (!recording) return -1;
-    snprintf(saved, sizeof(saved), "%s", zip_path);
-    if (!stop_recording() && saved[0]) notify("Replay saved", "%s%s", saved, NULL);
+    stop_recording(0); /* "Replay saved" comes when the pack is done (packs_ended) */
     return 0;
 }
 
@@ -697,9 +786,9 @@ void Recorder_HostAction(const char *what)
     if (recording && player_record) {
         char saved[sizeof(zip_path)];
         snprintf(saved, sizeof(saved), "%s", zip_path);
-        if (!stop_recording()) {
+        if (!stop_recording(1)) {
             notify("Recording stopped",
-                   "%s is not part of a replay, so the recording ended just before it. The replay is saved: %s", what,
+                   "%s is not part of a replay, so the recording ended just before it. The replay is being saved to %s", what,
                    saved);
         }
     } else if (playing && player_play) {
@@ -711,13 +800,11 @@ void Recorder_HostAction(const char *what)
 void Recorder_BeforeRestart(void)
 {
     if (recording) Recorder_Stop();
+    Recorder_FinishPacking(); /* the restart ends this process, threads and all */
 }
 
 int Recorder_TakeNotice(char *title, size_t title_size, char *text, size_t text_size)
 {
-    if (!notice_pending) return 0;
-    notice_pending = 0;
-    snprintf(title, title_size, "%s", notice_title);
-    snprintf(text, text_size, "%s", notice_text);
-    return 1;
+    packs_ended();
+    return NoticeQueue_Take(&notices, title, title_size, text, text_size);
 }
